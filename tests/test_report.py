@@ -77,3 +77,39 @@ class TestMarkdownEscaping:
         assert "<b>" not in out
         assert "`code`" not in out
         assert "\\<b\\>" in out
+
+
+# Second-round finding: a newline inside a remote-derived title could start
+# a new Markdown line and hoist block-level markup (headings, bare URLs)
+# out of the link text and into the document structure.
+INJECTION_TITLE = "Nice Film\n\n## INJECTED\n\nhttp://evil.example/phish"
+
+
+class TestMarkdownBlockInjection:
+    def test_newline_title_cannot_hoist_blocks(self):
+        slug = "some-film"
+        titles = {slug: INJECTION_TITLE}
+        out = render_markdown("target", [_match(slug=slug)], titles, {})
+        for line in out.splitlines():
+            # no heading and no bare-URL line originating from the title
+            assert not line.startswith("## INJECTED")
+            assert not line.strip().startswith("http://evil.example")
+        # the whole title stays inside the link text, flattened to one line
+        assert ("[Nice Film ## INJECTED http://evil.example/phish]"
+                "(https://letterboxd.com/film/some-film/)") in out
+
+    def test_all_vertical_whitespace_flattened(self):
+        slug = "some-film"
+        for ws in ["\n", "\r", "\r\n", "\v", "\f", "\x85",
+                   "\u2028", "\u2029"]:
+            titles = {slug: f"A{ws}{ws}## B"}
+            out = render_markdown("target", [_match(slug=slug)], titles, {})
+            assert "[A ## B](" in out, repr(ws)
+            assert not any(line.startswith("## B")
+                           for line in out.splitlines()), repr(ws)
+
+    def test_html_text_flattened_for_consistency(self):
+        slug = "some-film"
+        out = render_html("target", [_match(slug=slug)],
+                          {slug: INJECTION_TITLE}, {})
+        assert ">Nice Film ## INJECTED http://evil.example/phish</a>" in out

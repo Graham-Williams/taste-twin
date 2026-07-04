@@ -55,12 +55,25 @@ user-facing overview.
 - `PoliteSession._fetch_raw` rejects responses whose final URL (after
   redirects) is not letterboxd.com or a subdomain, and caps response
   bodies at 5 MB (streamed read).
-- `Retry-After` sleeps are clamped to 300 s.
+- `Retry-After` sleeps are clamped to 300 s, and the header is parsed
+  defensively (`.isdecimal()` + try/except — `"²".isdigit()` is True but
+  `float()` raises); any unparseable value falls back to normal backoff.
+- A per-candidate `ScrapeError` (off-site redirect, oversized body, retry
+  exhaustion) is caught inside the `verify.py` / `collect.py` loops: the
+  candidate is dropped with a warning, the run continues. Only
+  `MAX_CONSECUTIVE_FAILURES` (5) failures in a row — a site-wide problem —
+  abort the stage. In collect, a failed candidate writes no ratings file,
+  so a resumed run retries it. Regression tests in
+  `tests/test_resilience.py`.
 - Report output escapes everything remote-derived: HTML hrefs are
   URL-encoded then HTML-escaped; Markdown link text escapes
   ``\[]()<>` `` and URLs are percent-encoded (`report._md_text`,
-  `_film_url`, `_profile_url`). Regression tests in `tests/test_report.py`
-  and `tests/test_security.py`.
+  `_film_url`, `_profile_url`). All whitespace runs in report text —
+  including `\r`, `\n`, `\v`, `\f`, U+0085/U+2028/U+2029 — are flattened
+  to a single space (`report._flatten_ws`, applied in both Markdown and
+  HTML renderers) so a newline in a title can never hoist block-level
+  Markdown (headings, bare URLs) out of its link text. Regression tests
+  in `tests/test_report.py` and `tests/test_security.py`.
 - Untrusted names used as path components go through `util.safe_filename`
   (shared by `collect.py` and `__main__.py`).
 

@@ -10,10 +10,17 @@ from __future__ import annotations
 
 import logging
 
-from .scraper import PoliteSession, fetch_user_ratings
+from .scraper import (PoliteSession, ScrapeError, fetch_user_ratings,
+                      is_valid_name)
 from .similarity import Match, compare, zscores
 
 log = logging.getLogger("tastetwin")
+
+# One hostile/anomalous candidate (off-site redirect, oversized body, ...)
+# must not abort a long verify run — it gets dropped with a warning. But
+# this many failures IN A ROW means the problem is site-wide (or we're
+# blocked), so aborting beats burning the remaining request budget.
+MAX_CONSECUTIVE_FAILURES = 5
 
 
 def verify_matches(session: PoliteSession, target: dict[str, float],
@@ -34,8 +41,31 @@ def verify_matches(session: PoliteSession, target: dict[str, float],
     tz = zscores(target)
     verified: list[Match] = []
     dropped = 0
+    consecutive_failures = 0
     for i, m in enumerate(shortlist, 1):
-        ratings = fetch_user_ratings(session, m.username, max_pages=max_pages)
+        if not is_valid_name(m.username):
+            # fetch_user_ratings would return None for this too, but
+            # pre-checking keeps the log truthful: this account isn't
+            # "gone or private", its name failed charset validation.
+            log.info("  [%d/%d] %r: invalid username — dropped",
+                     i, len(shortlist), m.username)
+            dropped += 1
+            continue
+        try:
+            ratings = fetch_user_ratings(session, m.username,
+                                         max_pages=max_pages)
+        except ScrapeError as exc:
+            consecutive_failures += 1
+            dropped += 1
+            log.warning("  [%d/%d] %s: fetch failed (%s) — dropped",
+                        i, len(shortlist), m.username, exc)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                raise ScrapeError(
+                    f"{consecutive_failures} consecutive candidate fetch "
+                    f"failures — aborting verify (likely site-wide, "
+                    f"last error: {exc})") from exc
+            continue
+        consecutive_failures = 0
         if not ratings:
             log.info("  [%d/%d] %s: gone or private — dropped",
                      i, len(shortlist), m.username)

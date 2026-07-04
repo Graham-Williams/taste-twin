@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html as html_mod
+import re
 from datetime import date
 from pathlib import Path
 from urllib.parse import quote
@@ -28,10 +29,22 @@ def _film_url(slug: str) -> str:
 # injecting markup. Backslash itself must be in the set.
 _MD_SPECIALS = "\\[]()<>`"
 
+# Any run of whitespace — including \r, \n, \v, \f and Unicode line/paragraph
+# separators (U+0085, U+2028, U+2029), all matched by \s — collapses to one
+# space. Without this, a newline inside a remote-derived title would start a
+# new Markdown line and could hoist block-level markup (headings, bare URLs)
+# out of its link text and into the document structure.
+_WS_RUN_RE = re.compile(r"\s+")
+
+
+def _flatten_ws(text: str) -> str:
+    """Collapse all vertical/horizontal whitespace runs to a single space."""
+    return _WS_RUN_RE.sub(" ", text)
+
 
 def _md_text(text: str) -> str:
     return "".join(
-        "\\" + ch if ch in _MD_SPECIALS else ch for ch in text)
+        "\\" + ch if ch in _MD_SPECIALS else ch for ch in _flatten_ws(text))
 
 METHODOLOGY = (
     "Every rater has a personal scale — one person's 3 stars is another's "
@@ -135,7 +148,13 @@ _CSS = """
 
 def render_html(target: str, matches: list[Match], titles: dict[str, str],
                 popularity: dict[str, int], top_n: int = 20) -> str:
-    esc = html_mod.escape
+    def esc(text: str) -> str:
+        # Flatten whitespace for consistency with the Markdown renderer
+        # (harmless in HTML — escaping alone already neutralizes markup —
+        # but keeps remote-derived strings uniform across both outputs).
+        # URLs passed through here are already percent-encoded, so they
+        # contain no whitespace to flatten.
+        return html_mod.escape(_flatten_ws(text))
 
     def film_link(slug: str) -> str:
         # slug is remote-derived: URL-encode it, then HTML-escape the

@@ -135,6 +135,29 @@ class TestRetryAfterClamp:
         assert s._fetch_raw("https://letterboxd.com/x/") == (200, "recovered")
         assert sleeps and max(sleeps) <= scraper.MAX_RETRY_AFTER_SECONDS
 
+    def test_unicode_digit_retry_after_does_not_crash(self, tmp_path,
+                                                      monkeypatch):
+        # "²".isdigit() is True but float("²") raises — a hostile/proxied
+        # Retry-After must fall back to normal backoff, not kill the run.
+        sleeps = []
+        monkeypatch.setattr(scraper.time, "sleep", sleeps.append)
+        s = _session_returning(tmp_path, [
+            _FakeResp(status=429, headers={"Retry-After": "²"}),
+            _FakeResp(body=b"recovered"),
+        ])
+        assert s._fetch_raw("https://letterboxd.com/x/") == (200, "recovered")
+        assert sleeps == [2.0]  # the normal first-attempt backoff
+
+    def test_enormous_retry_after_is_clamped(self, tmp_path, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(scraper.time, "sleep", sleeps.append)
+        s = _session_returning(tmp_path, [
+            _FakeResp(status=429, headers={"Retry-After": "99999999"}),
+            _FakeResp(body=b"recovered"),
+        ])
+        assert s._fetch_raw("https://letterboxd.com/x/") == (200, "recovered")
+        assert sleeps == [scraper.MAX_RETRY_AFTER_SECONDS]
+
 
 class TestSafeFilename:
     def test_traversal_neutralized(self):

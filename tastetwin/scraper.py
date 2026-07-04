@@ -187,6 +187,12 @@ class PoliteSession:
                     f"{resp.url} response exceeds {MAX_RESPONSE_BYTES} "
                     f"bytes — aborting")
             chunks.append(chunk)
+        # NOTE: falls back to UTF-8 when no charset header is present,
+        # deliberately NOT requests' apparent_encoding (chardet sniffing):
+        # the stream is already consumed here so resp.content (which
+        # apparent_encoding needs) would raise, and Letterboxd always
+        # declares charset=utf-8 anyway. errors="replace" keeps a stray
+        # mis-decoded byte from crashing the run.
         return b"".join(chunks).decode(resp.encoding or "utf-8",
                                        errors="replace")
 
@@ -212,8 +218,18 @@ class PoliteSession:
                 raise ScrapeError(
                     f"{url} still failing ({resp.status_code}) after "
                     f"{MAX_RETRIES} retries")
-            retry_after = resp.headers.get("Retry-After")
-            delay = float(retry_after) if (retry_after or "").isdigit() else backoff
+            # Parse Retry-After defensively: it is attacker-influenced
+            # (hostile/proxied responses), and e.g. "²" passes .isdigit()
+            # but makes float() raise. .isdecimal() rejects that, and the
+            # try/except catches anything else — any parse failure falls
+            # back to the normal exponential backoff instead of crashing.
+            retry_after = resp.headers.get("Retry-After") or ""
+            delay = backoff
+            if retry_after.isdecimal():
+                try:
+                    delay = float(retry_after)
+                except ValueError:
+                    delay = backoff
             delay = min(delay, MAX_RETRY_AFTER_SECONDS)
             log.warning("HTTP %s on %s — backing off %.0fs",
                         resp.status_code, url, delay)

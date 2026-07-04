@@ -13,12 +13,18 @@ import logging
 import time
 from pathlib import Path
 
-from .scraper import PoliteSession, fetch_user_ratings
+from .scraper import PoliteSession, ScrapeError, fetch_user_ratings
 from .util import safe_filename
 
 log = logging.getLogger("tastetwin")
 
 MIN_RATINGS = 20  # candidates with fewer total ratings are skipped
+
+# One hostile/anomalous candidate (off-site redirect, oversized body, ...)
+# must not abort a long collection run — it gets dropped with a warning.
+# But this many failures IN A ROW means the problem is site-wide (or we're
+# blocked), so aborting beats burning the remaining request budget.
+MAX_CONSECUTIVE_FAILURES = 5
 
 
 def _candidate_path(ratings_dir: Path, username: str) -> Path:
@@ -43,13 +49,28 @@ def collect_pool_ratings(session: PoliteSession, pool: list[str],
                  done_before, len(pool))
 
     fresh_done = 0
+    consecutive_failures = 0
     for i, username in enumerate(pool, 1):
         path = _candidate_path(ratings_dir, username)
         if path.exists():
             data = json.loads(path.read_text())
         else:
-            ratings = fetch_user_ratings(session, username,
-                                         max_pages=max_pages)
+            try:
+                ratings = fetch_user_ratings(session, username,
+                                             max_pages=max_pages)
+            except ScrapeError as exc:
+                consecutive_failures += 1
+                skipped += 1
+                # No file is written, so a rerun will retry this candidate.
+                log.warning("Candidate %s: fetch failed (%s) — dropped",
+                            username, exc)
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    raise ScrapeError(
+                        f"{consecutive_failures} consecutive candidate "
+                        f"fetch failures — aborting collection (likely "
+                        f"site-wide, last error: {exc})") from exc
+                continue
+            consecutive_failures = 0
             data = {"username": username, "ratings": ratings or {}}
             path.write_text(json.dumps(data))
             fresh_done += 1
