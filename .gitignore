@@ -1,0 +1,19 @@
+# Data & caches (scraped pages, progress state, reports)
+data/
+
+# Environment / secrets (none expected, but never commit them)
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS
+.DS_Store
