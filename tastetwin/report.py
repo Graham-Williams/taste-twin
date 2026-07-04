@@ -5,11 +5,33 @@ from __future__ import annotations
 import html as html_mod
 from datetime import date
 from pathlib import Path
+from urllib.parse import quote
 
 from .similarity import Match
 
 PROFILE_URL = "https://letterboxd.com/{user}/"
 FILM_URL = "https://letterboxd.com/film/{slug}/"
+
+
+def _profile_url(user: str) -> str:
+    """Profile URL with the (remote-derived) username URL-encoded."""
+    return PROFILE_URL.format(user=quote(user, safe=""))
+
+
+def _film_url(slug: str) -> str:
+    """Film URL with the (remote-derived) slug URL-encoded."""
+    return FILM_URL.format(slug=quote(slug, safe=""))
+
+
+# Markdown link-text metacharacters: escaping these keeps remote-derived
+# strings (titles, usernames, slugs) from breaking out of [text](url) or
+# injecting markup. Backslash itself must be in the set.
+_MD_SPECIALS = "\\[]()<>`"
+
+
+def _md_text(text: str) -> str:
+    return "".join(
+        "\\" + ch if ch in _MD_SPECIALS else ch for ch in text)
 
 METHODOLOGY = (
     "Every rater has a personal scale — one person's 3 stars is another's "
@@ -59,7 +81,7 @@ def render_markdown(target: str, matches: list[Match],
                     titles: dict[str, str], popularity: dict[str, int],
                     top_n: int = 20) -> str:
     lines = [
-        f"# Taste twins for [{target}]({PROFILE_URL.format(user=target)})",
+        f"# Taste twins for [{_md_text(target)}]({_profile_url(target)})",
         "",
         f"*Generated {date.today().isoformat()} · top {min(top_n, len(matches))} "
         f"of {len(matches)} scored candidates*",
@@ -67,21 +89,21 @@ def render_markdown(target: str, matches: list[Match],
     ]
     for rank, m in enumerate(matches[:top_n], 1):
         lines.append(
-            f"## {rank}. [{m.username}]({PROFILE_URL.format(user=m.username)})"
+            f"## {rank}. [{_md_text(m.username)}]({_profile_url(m.username)})"
             f" — score {m.score:.3f}")
         lines.append("")
         lines.append(f"- **Pearson r:** {m.pearson:.3f} over "
                      f"**{m.overlap}** co-rated films")
-        lines.append(f"- **Data:** {_source_note(m)}")
+        lines.append(f"- **Data:** {_md_text(_source_note(m))}")
         loves = _fmt_loves(m, titles, popularity)
         if loves:
             loved = ", ".join(
-                f"[{_title(s, titles)}]({FILM_URL.format(slug=s)})"
+                f"[{_md_text(_title(s, titles))}]({_film_url(s)})"
                 for s in loves)
             lines.append(f"- **Films you both love:** {loved}")
         if m.disagreements:
             dis = "; ".join(
-                f"[{_title(s, titles)}]({FILM_URL.format(slug=s)}) "
+                f"[{_md_text(_title(s, titles))}]({_film_url(s)}) "
                 f"(you {tz:+.1f}σ, them {cz:+.1f}σ)"
                 for s, tz, cz in m.disagreements[:3])
             lines.append(f"- **Biggest disagreements:** {dis}")
@@ -116,7 +138,9 @@ def render_html(target: str, matches: list[Match], titles: dict[str, str],
     esc = html_mod.escape
 
     def film_link(slug: str) -> str:
-        return (f'<a href="{FILM_URL.format(slug=slug)}">'
+        # slug is remote-derived: URL-encode it, then HTML-escape the
+        # whole attribute value.
+        return (f'<a href="{esc(_film_url(slug))}">'
                 f'{esc(_title(slug, titles))}</a>')
 
     cards = []
@@ -134,7 +158,7 @@ def render_html(target: str, matches: list[Match], titles: dict[str, str],
                         f'</span> — {items}</div>')
         cards.append(f"""
   <div class="match">
-    <h2>{rank}. <a href="{PROFILE_URL.format(user=esc(m.username))}">{esc(m.username)}</a>
+    <h2>{rank}. <a href="{esc(_profile_url(m.username))}">{esc(m.username)}</a>
         <span class="score">score {m.score:.3f}</span></h2>
     <div class="stats">Pearson r = {m.pearson:.3f} over {m.overlap} co-rated
         films &middot; {esc(_source_note(m))}</div>
@@ -151,7 +175,7 @@ def render_html(target: str, matches: list[Match], titles: dict[str, str],
 <style>{_CSS}</style>
 </head>
 <body>
-  <h1>Taste twins for <a href="{PROFILE_URL.format(user=esc(target))}">{esc(target)}</a></h1>
+  <h1>Taste twins for <a href="{esc(_profile_url(target))}">{esc(target)}</a></h1>
   <p class="sub">Generated {date.today().isoformat()} &middot;
      top {min(top_n, len(matches))} of {len(matches)} scored candidates</p>
   {''.join(cards)}

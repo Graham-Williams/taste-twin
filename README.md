@@ -29,15 +29,20 @@ generous 5-star rater), with significance weighting
 ## Requirements
 
 - Python 3.11+
-- `requests`, `beautifulsoup4`, `kagglehub` (see `requirements.txt`)
-- ~2.3 GB disk for the dataset + SQLite pool (under `data/`, gitignored)
+- `requests`, `beautifulsoup4`, `kagglehub` (see `requirements.txt`);
+  dev/test tooling (`pytest`) lives in `requirements-dev.txt`
+- ~2.3 GB disk for the dataset + SQLite pool. The `kagglehub` download is
+  cached under `~/.cache/kagglehub/`; `data/` (gitignored) holds the built
+  `data/pool.db` and, only if you use the manual fallback, the CSVs in
+  `data/dataset/`
 
 ## Setup
 
 ```bash
 python3 -m venv .venv           # or: uv venv --python 3.12
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt      # runtime deps
+pip install -r requirements-dev.txt  # optional: adds pytest for the test suite
 ```
 
 ## Usage
@@ -49,9 +54,10 @@ python -m tastetwin run <letterboxd-username>
 ```
 
 The first run downloads the Kaggle dataset via `kagglehub` (no Kaggle
-account needed) and builds `data/pool.db` (~1 minute). If the automatic
-download ever fails, download the zip from the dataset page and unzip
-`ratings.csv` + `films.csv` into `data/dataset/`.
+account needed; the download is cached under `~/.cache/kagglehub/`) and
+builds `data/pool.db` (~1 minute). If the automatic download ever fails,
+download the zip from the dataset page and unzip `ratings.csv` +
+`films.csv` into `data/dataset/`.
 
 Useful options:
 
@@ -110,6 +116,7 @@ This project only reads public pages, and does so gently:
 ## Tests
 
 ```bash
+pip install -r requirements-dev.txt   # once, for pytest
 python -m pytest
 ```
 

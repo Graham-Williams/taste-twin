@@ -15,18 +15,20 @@ user-facing overview.
 ## Stack
 
 - Python 3.11+ (no 3.11+ interpreter on the system? use `uv venv --python 3.12`)
-- Plain `venv` + `requirements.txt`; deps kept minimal: `requests`,
-  `beautifulsoup4`, `kagglehub` (dataset download — works for this public
-  dataset WITHOUT Kaggle credentials), `pytest` (dev). Similarity math is
-  stdlib — no numpy/pandas.
+- Plain `venv`; runtime deps in `requirements.txt` (kept minimal:
+  `requests>=2.32.4`, `beautifulsoup4`, `kagglehub` — dataset download works
+  for this public dataset WITHOUT Kaggle credentials); dev deps in
+  `requirements-dev.txt` (`pytest`). Similarity math is stdlib — no
+  numpy/pandas.
 - Package `tastetwin/`:
   - `scraper.py` — polite HTTP (PoliteSession: 1 req/s, UA, backoff,
     disk cache, robots.txt) + HTML parsing. Selector notes live in its
     docstring; fixtures in `tests/fixtures/` are saved real pages.
-  - `ingest.py` — kagglehub download (manual fallback: unzip CSVs into
-    `data/dataset/`) → streamed load into SQLite `data/pool.db` (~1.6 GB,
-    ~45 s) with film/user indexes + a precomputed `user_stats` table
-    (per-user mean/var for z-scoring overlap slices).
+  - `ingest.py` — kagglehub download (cached under `~/.cache/kagglehub/`,
+    NOT `data/`; manual fallback: unzip CSVs into `data/dataset/`) →
+    streamed load into SQLite `data/pool.db` (~1.6 GB, ~45 s) with
+    film/user indexes + a precomputed `user_stats` table (per-user
+    mean/var for z-scoring overlap slices).
   - `similarity.py` — per-user z-scores, Pearson over co-rated films,
     significance weighting `r * min(overlap,50)/50`. Dataset ratings are
     stored as half-stars (1–10) to match the scraper.
@@ -38,15 +40,36 @@ user-facing overview.
   - `report.py` — report.md + standalone report.html (inline CSS).
   - `__main__.py` — CLI.
 - All bulky/local state under `data/` (gitignored): `cache/` (HTTP),
-  `pool.db`, `dataset/` (manual CSVs), `runs/<user>/` (target.json,
-  matches_*.json, report.md/html).
+  `pool.db`, `dataset/` (manual-fallback CSVs only), `runs/<user>/`
+  (target.json, matches_*.json, report.md/html). Exception: the raw
+  kagglehub download itself is cached under `~/.cache/kagglehub/`, not
+  `data/`.
+
+## Security hardening (keep these invariants)
+
+- Scraped/CSV usernames and film slugs are validated against
+  `^[A-Za-z0-9_-]+$` (`scraper.is_valid_name`) and silently dropped (debug
+  log) before ANY URL is built — in the parsers, the high-level fetchers,
+  and `discover._raters_page`. Never interpolate an unvalidated remote
+  string into a request URL.
+- `PoliteSession._fetch_raw` rejects responses whose final URL (after
+  redirects) is not letterboxd.com or a subdomain, and caps response
+  bodies at 5 MB (streamed read).
+- `Retry-After` sleeps are clamped to 300 s.
+- Report output escapes everything remote-derived: HTML hrefs are
+  URL-encoded then HTML-escaped; Markdown link text escapes
+  ``\[]()<>` `` and URLs are percent-encoded (`report._md_text`,
+  `_film_url`, `_profile_url`). Regression tests in `tests/test_report.py`
+  and `tests/test_security.py`.
+- Untrusted names used as path components go through `util.safe_filename`
+  (shared by `collect.py` and `__main__.py`).
 
 ## Run / test
 
 ```bash
 # setup
 python3 -m venv .venv && source .venv/bin/activate   # or: uv venv --python 3.12
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # dev deps include -r requirements.txt
 
 # end-to-end (default: fetch → ingest → analyze → verify → report)
 python -m tastetwin run <user> [--verify-top 50] [--min-overlap 15] [--max-pages 10]

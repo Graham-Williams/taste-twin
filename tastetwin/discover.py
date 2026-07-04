@@ -111,7 +111,11 @@ def build_candidate_pool(session: PoliteSession, seeds: list[dict],
 
 
 def _raters_page(session: PoliteSession, slug: str, page: int) -> list[str]:
-    from .scraper import BASE_URL, parse_film_members_page
+    from .scraper import BASE_URL, is_valid_name, parse_film_members_page
+    if not is_valid_name(slug):
+        log.debug("dropping non-conforming film slug %r — never fetched",
+                  slug)
+        return []
     suffix = "" if page == 1 else f"page/{page}/"
     url = f"{BASE_URL}/film/{slug}/members/rated/.5-5/{suffix}"
     status, body = session.get(url)

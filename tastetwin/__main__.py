@@ -38,13 +38,14 @@ from .ingest import ensure_pool_db, pool_overlap_ratings
 from .report import write_reports
 from .scraper import PoliteSession, fetch_user_ratings
 from .similarity import Match, rank_candidates
+from .util import safe_filename
 from .verify import verify_matches
 
 log = logging.getLogger("tastetwin")
 
 
 def _run_dir(data_dir: Path, username: str) -> Path:
-    d = data_dir / "runs" / username.lower()
+    d = data_dir / "runs" / safe_filename(username.lower())
     d.mkdir(parents=True, exist_ok=True)
     return d
 

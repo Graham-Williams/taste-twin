@@ -45,9 +45,23 @@ MIN_DELAY_SECONDS = 1.0
 CACHE_TTL_SECONDS = 7 * 24 * 3600  # a week; taste data moves slowly
 MAX_RETRIES = 4
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+MAX_RETRY_AFTER_SECONDS = 300.0  # clamp server-supplied Retry-After
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # abort any response body beyond this
+ALLOWED_HOST = "letterboxd.com"  # redirects must not leave this site
 
 FILMS_PER_PAGE = 72
 MEMBERS_PER_PAGE = 25
+
+# Letterboxd usernames and film slugs share this charset. Anything scraped
+# or dataset-derived that doesn't conform is dropped before it can ever be
+# interpolated into a request URL (path traversal / query / fragment
+# injection defense).
+VALID_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def is_valid_name(candidate: str) -> bool:
+    """True if a username or film slug is safe to place in a URL path."""
+    return bool(VALID_NAME_RE.fullmatch(candidate))
 
 
 class ScrapeError(Exception):
@@ -145,7 +159,7 @@ class PoliteSession:
 
     def _check_robots(self, url: str) -> None:
         if self._robots is None:
-            text = self._fetch_raw(f"{BASE_URL}/robots.txt").text
+            _status, text = self._fetch_raw(f"{BASE_URL}/robots.txt")
             self._robots = _Robots(text)
         path = urlparse(url).path
         if not self._robots.allowed(path):
@@ -158,21 +172,49 @@ class PoliteSession:
         if wait > 0:
             time.sleep(wait)
 
-    def _fetch_raw(self, url: str) -> requests.Response:
+    @staticmethod
+    def _read_body(resp: requests.Response) -> str:
+        """Read a streamed response body, refusing anything over
+        MAX_RESPONSE_BYTES (a Letterboxd page is ~200 KB; anything huge is
+        either a bug or hostile)."""
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=65536):
+            total += len(chunk)
+            if total > MAX_RESPONSE_BYTES:
+                resp.close()
+                raise ScrapeError(
+                    f"{resp.url} response exceeds {MAX_RESPONSE_BYTES} "
+                    f"bytes — aborting")
+            chunks.append(chunk)
+        return b"".join(chunks).decode(resp.encoding or "utf-8",
+                                       errors="replace")
+
+    def _fetch_raw(self, url: str) -> tuple[int, str]:
         backoff = 2.0
         for attempt in range(MAX_RETRIES + 1):
             self._throttle()
             self._last_request_at = time.monotonic()
             self.requests_made += 1
-            resp = self._session.get(url, timeout=30)
+            resp = self._session.get(url, timeout=30, stream=True)
             if resp.status_code not in RETRYABLE_STATUSES:
-                return resp
+                # Redirects must not leave the site we agreed to scrape.
+                host = urlparse(resp.url).hostname or ""
+                if host != ALLOWED_HOST and not host.endswith(
+                        "." + ALLOWED_HOST):
+                    resp.close()
+                    raise ScrapeError(
+                        f"{url} redirected off-site to {resp.url!r} — "
+                        f"refusing to read it")
+                return resp.status_code, self._read_body(resp)
+            resp.close()
             if attempt == MAX_RETRIES:
                 raise ScrapeError(
                     f"{url} still failing ({resp.status_code}) after "
                     f"{MAX_RETRIES} retries")
             retry_after = resp.headers.get("Retry-After")
             delay = float(retry_after) if (retry_after or "").isdigit() else backoff
+            delay = min(delay, MAX_RETRY_AFTER_SECONDS)
             log.warning("HTTP %s on %s — backing off %.0fs",
                         resp.status_code, url, delay)
             time.sleep(delay)
@@ -183,13 +225,16 @@ class PoliteSession:
         """Return (status, body) for a URL, via cache when fresh."""
         cached = self._cache_read(url)
         if cached is not None:
+            # Cached responses skip the robots.txt re-check: the URL passed
+            # the check when originally fetched and the TTL is short relative
+            # to how often robots.txt changes — accepted trade-off.
             self.cache_hits += 1
             return cached["status"], cached["body"]
         self._check_robots(url)
-        resp = self._fetch_raw(url)
-        if resp.status_code in (200, 404):  # cache 404s too (deleted users)
-            self._cache_write(url, resp.status_code, resp.text)
-        return resp.status_code, resp.text
+        status, body = self._fetch_raw(url)
+        if status in (200, 404):  # cache 404s too (deleted users)
+            self._cache_write(url, status, body)
+        return status, body
 
 
 # -- parsing ---------------------------------------------------------------
@@ -218,6 +263,9 @@ def parse_user_films_page(html: str) -> tuple[list[FilmRating], int | None]:
         if comp is None:
             continue
         slug = comp["data-item-slug"]
+        if not is_valid_name(slug):
+            log.debug("dropping film with non-conforming slug %r", slug)
+            continue
         title = comp.get("data-item-name") or slug
         rating = None
         rating_span = item.select_one("p.poster-viewingdata span.rating")
@@ -247,7 +295,12 @@ def parse_film_members_page(html: str) -> tuple[list[str], bool]:
     for cell in soup.select("td.col-member"):
         link = cell.select_one("a.name")
         if link and link.get("href"):
-            users.append(link["href"].strip("/"))
+            name = link["href"].strip("/")
+            if not is_valid_name(name):
+                log.debug("dropping member with non-conforming "
+                          "username %r", name)
+                continue
+            users.append(name)
     has_next = soup.select_one("a.next") is not None
     return users, has_next
 
@@ -270,6 +323,10 @@ def fetch_user_ratings(session: PoliteSession, username: str,
     Returns {slug: {"title": ..., "rating": half_stars}} with only *rated*
     films, or None if the profile doesn't exist / isn't public.
     """
+    if not is_valid_name(username):
+        log.debug("dropping non-conforming username %r — never fetched",
+                  username)
+        return None
     ratings: dict[str, dict] = {}
     page = 1
     while True:
@@ -298,6 +355,10 @@ def fetch_user_ratings(session: PoliteSession, username: str,
 def fetch_film_raters(session: PoliteSession, slug: str,
                       max_pages: int = 4) -> list[str]:
     """Fetch usernames who rated a film (any rating), a few pages' worth."""
+    if not is_valid_name(slug):
+        log.debug("dropping non-conforming film slug %r — never fetched",
+                  slug)
+        return []
     users: list[str] = []
     for page in range(1, max_pages + 1):
         suffix = "" if page == 1 else f"page/{page}/"
@@ -314,6 +375,10 @@ def fetch_film_raters(session: PoliteSession, slug: str,
 
 def fetch_film_popularity(session: PoliteSession, slug: str) -> int | None:
     """Number of members who watched the film (its global popularity)."""
+    if not is_valid_name(slug):
+        log.debug("dropping non-conforming film slug %r — never fetched",
+                  slug)
+        return None
     status, body = session.get(f"{BASE_URL}/csi/film/{slug}/stats/")
     if status != 200:
         return None

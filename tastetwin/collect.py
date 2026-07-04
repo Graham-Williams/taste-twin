@@ -10,21 +10,19 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from pathlib import Path
 
 from .scraper import PoliteSession, fetch_user_ratings
+from .util import safe_filename
 
 log = logging.getLogger("tastetwin")
 
 MIN_RATINGS = 20  # candidates with fewer total ratings are skipped
 
-_SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]")
-
 
 def _candidate_path(ratings_dir: Path, username: str) -> Path:
-    return ratings_dir / f"{_SAFE_NAME.sub('_', username)}.json"
+    return ratings_dir / f"{safe_filename(username)}.json"
 
 
 def collect_pool_ratings(session: PoliteSession, pool: list[str],
