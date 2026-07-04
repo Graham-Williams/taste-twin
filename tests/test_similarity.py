@@ -119,3 +119,30 @@ class TestCompare:
         m = compare(a, dict(a), min_overlap=5)
         assert m is not None
         assert m.disagreements == []  # identical taste: no gaps >= 1 sigma
+
+
+class TestOverlapSliceWithGlobalStats:
+    def test_cand_stats_used_for_love_zscores(self):
+        # Candidate slice only holds overlap films, all rated 8 — with no
+        # global stats their z-scores would be 0 (no signal). With global
+        # stats (mean 5, std 2 over full history) an 8 is +1.5 sigma: love.
+        target = {f"f{i}": float((i % 10) + 1) for i in range(30)}
+        target["f-gem"] = 10.0
+        cand_slice = {"f-gem": 8.0}
+        cand_slice.update({f"f{i}": target[f"f{i}"] for i in range(20)})
+
+        from tastetwin.similarity import compare
+        m = compare(target, cand_slice, min_overlap=10,
+                    cand_stats=(5.0, 2.0))
+        assert m is not None
+        assert "f-gem" in m.shared_loves
+
+    def test_rank_candidates_passes_stats_and_source(self):
+        target = {f"f{i}": float((i % 10) + 1) for i in range(30)}
+        cands = {"u1": dict(target)}
+        ranked = rank_candidates(target, cands, min_overlap=10,
+                                 cand_stats={"u1": (5.5, 2.87)},
+                                 source="dataset")
+        assert ranked[0].username == "u1"
+        assert ranked[0].source == "dataset"
+        assert ranked[0].pearson == pytest.approx(1.0)

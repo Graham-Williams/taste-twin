@@ -21,8 +21,25 @@ METHODOLOGY = (
     "then shrunk for small overlaps — agreeing on 12 films is weaker "
     "evidence than agreeing on 50 — by multiplying by "
     "min(overlap, 50) / 50. A score near 1.0 means: large overlap, and "
-    "within it you consistently love and dislike the same films."
+    "within it you consistently love and dislike the same films. "
+    "The candidate pool is a public snapshot of ~11,000 of Letterboxd's "
+    "most active members (Kaggle: freeth/letterboxd-film-ratings, CC0, "
+    "Oct 2023); matches marked “verified live” were re-scored "
+    "against the account's current public ratings."
 )
+
+_SOURCE_LABELS = {
+    "live": "verified live",
+    "dataset": "dataset snapshot (Oct 2023)",
+    "scraped": "scraped pool",
+}
+
+
+def _source_note(m: Match) -> str:
+    label = _SOURCE_LABELS.get(m.source, m.source)
+    if m.source == "live" and m.dataset_score is not None:
+        label += f"; dataset score was {m.dataset_score:.3f}"
+    return label
 
 
 def _fmt_loves(match: Match, titles: dict[str, str],
@@ -55,6 +72,7 @@ def render_markdown(target: str, matches: list[Match],
         lines.append("")
         lines.append(f"- **Pearson r:** {m.pearson:.3f} over "
                      f"**{m.overlap}** co-rated films")
+        lines.append(f"- **Data:** {_source_note(m)}")
         loves = _fmt_loves(m, titles, popularity)
         if loves:
             loved = ", ".join(
@@ -118,7 +136,8 @@ def render_html(target: str, matches: list[Match], titles: dict[str, str],
   <div class="match">
     <h2>{rank}. <a href="{PROFILE_URL.format(user=esc(m.username))}">{esc(m.username)}</a>
         <span class="score">score {m.score:.3f}</span></h2>
-    <div class="stats">Pearson r = {m.pearson:.3f} over {m.overlap} co-rated films</div>
+    <div class="stats">Pearson r = {m.pearson:.3f} over {m.overlap} co-rated
+        films &middot; {esc(_source_note(m))}</div>
     {loves_html}
     {dis_html}
   </div>""")

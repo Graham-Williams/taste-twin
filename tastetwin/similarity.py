@@ -10,20 +10,28 @@ MIN_OVERLAP_DEFAULT = 15
 SIGNIFICANCE_CAP = 50
 
 
-def zscores(ratings: dict[str, float]) -> dict[str, float]:
+def mean_std(values: list[float]) -> tuple[float, float]:
+    """Mean and population standard deviation."""
+    n = len(values)
+    mean = sum(values) / n
+    var = sum((v - mean) ** 2 for v in values) / n
+    return mean, math.sqrt(var)
+
+
+def zscores(ratings: dict[str, float],
+            stats: tuple[float, float] | None = None) -> dict[str, float]:
     """Normalize a user's ratings by their own mean and (population) std.
 
     Handles different personal scales: someone whose ratings live in 2–3.5
     stars and someone who uses the full 0.5–5 range produce comparable
-    z-scores. If the user rates everything identically (std == 0) there is
-    no signal; every z-score is 0.
+    z-scores. `stats` may supply a precomputed (mean, std) over the user's
+    FULL rating history when `ratings` is only a slice of it. If the user
+    rates everything identically (std == 0) there is no signal; every
+    z-score is 0.
     """
     if not ratings:
         return {}
-    values = list(ratings.values())
-    mean = sum(values) / len(values)
-    var = sum((v - mean) ** 2 for v in values) / len(values)
-    std = math.sqrt(var)
+    mean, std = stats if stats is not None else mean_std(list(ratings.values()))
     if std == 0:
         return {k: 0.0 for k in ratings}
     return {k: (v - mean) / std for k, v in ratings.items()}
@@ -65,6 +73,8 @@ class Match:
     score: float           # r * significance weight — the ranking key
     pearson: float         # raw correlation over the overlap
     overlap: int           # number of co-rated films
+    source: str = "dataset"            # "dataset" | "live" | "scraped"
+    dataset_score: float | None = None  # pre-verification score, if any
     shared_loves: list[str] = field(default_factory=list)      # slugs
     disagreements: list[tuple[str, float, float]] = field(default_factory=list)
     # disagreements: (slug, target_z, candidate_z)
@@ -72,13 +82,17 @@ class Match:
 
 def compare(target: dict[str, float], candidate: dict[str, float],
             min_overlap: int = MIN_OVERLAP_DEFAULT,
-            love_z: float = 0.5) -> Match | None:
+            love_z: float = 0.5,
+            target_z: dict[str, float] | None = None,
+            cand_stats: tuple[float, float] | None = None) -> Match | None:
     """Score a candidate against the target user.
 
     Returns None when the overlap is below min_overlap or the correlation
     is undefined. shared_loves / disagreements use z-scores computed over
-    each user's FULL ratings (their whole personal scale), while the
-    Pearson r is computed on the overlap set.
+    each user's FULL ratings (their whole personal scale) — pass
+    `cand_stats` = (mean, std) when `candidate` holds only the overlap
+    slice of the candidate's history. The Pearson r itself is computed on
+    the overlap set.
     """
     overlap_keys = sorted(set(target) & set(candidate))
     if len(overlap_keys) < min_overlap:
@@ -88,8 +102,8 @@ def compare(target: dict[str, float], candidate: dict[str, float],
         return None
     score = r * significance_weight(len(overlap_keys))
 
-    tz = zscores(target)
-    cz = zscores(candidate)
+    tz = target_z if target_z is not None else zscores(target)
+    cz = zscores(candidate, stats=cand_stats)
     shared_loves = sorted(
         (k for k in overlap_keys if tz[k] >= love_z and cz[k] >= love_z),
         key=lambda k: -(tz[k] + cz[k]))
@@ -105,13 +119,24 @@ def compare(target: dict[str, float], candidate: dict[str, float],
 
 def rank_candidates(target: dict[str, float],
                     candidates: dict[str, dict[str, float]],
-                    min_overlap: int = MIN_OVERLAP_DEFAULT) -> list[Match]:
-    """Compare every candidate to the target; return matches sorted by score."""
+                    min_overlap: int = MIN_OVERLAP_DEFAULT,
+                    cand_stats: dict[str, tuple[float, float]] | None = None,
+                    source: str = "dataset") -> list[Match]:
+    """Compare every candidate to the target; return matches sorted by score.
+
+    `candidates` may hold full rating histories, or (for the dataset pool)
+    only each user's overlap with the target — in that case pass
+    `cand_stats` = {user: (mean, std)} computed over full histories.
+    """
+    tz = zscores(target)
     matches: list[Match] = []
     for username, ratings in candidates.items():
-        m = compare(target, ratings, min_overlap=min_overlap)
+        m = compare(target, ratings, min_overlap=min_overlap,
+                    target_z=tz,
+                    cand_stats=(cand_stats or {}).get(username))
         if m is not None:
             m.username = username
+            m.source = source
             matches.append(m)
     matches.sort(key=lambda m: -m.score)
     return matches
