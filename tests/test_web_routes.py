@@ -48,6 +48,12 @@ def test_security_headers_present(dev_app):
     resp = dev_app.test_client().get("/")
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["X-Frame-Options"] == "DENY"
+    # Must stay "same-origin", NOT "no-referrer": under no-referrer a browser
+    # sends `Origin: null` and no Referer on the app's own form POST, which the
+    # CSRF pin (_host_origin_pin) then rejects with 403 — the form becomes
+    # unusable in a real browser. same-origin keeps CSRF enforced while still
+    # sending no referrer cross-origin. Do not revert without fixing the pin.
+    assert resp.headers["Referrer-Policy"] == "same-origin"
     csp = resp.headers["Content-Security-Policy"]
     assert "base-uri 'none'" in csp
     assert "object-src 'none'" in csp

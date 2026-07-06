@@ -124,7 +124,13 @@ def create_app(data_dir: str | Path | None = None, runner=None,
     def _security_headers(resp: Response) -> Response:
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault("X-Frame-Options", "DENY")
-        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        # "same-origin" (not "no-referrer") is required for the CSRF pin to work:
+        # under "no-referrer" a browser sends `Origin: null` AND no Referer on the
+        # app's own same-origin form POST, which _host_origin_pin then rejects (403).
+        # "same-origin" makes same-origin POSTs carry the real Origin (CSRF stays
+        # enforced) while still sending NO referrer to cross-origin links (e.g.
+        # outbound letterboxd.com URLs in reports) — preserving the privacy intent.
+        resp.headers.setdefault("Referrer-Policy", "same-origin")
         resp.headers.setdefault("Content-Security-Policy", _CSP)
         return resp
 
