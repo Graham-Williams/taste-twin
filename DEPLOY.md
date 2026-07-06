@@ -7,6 +7,34 @@ Cloudflare tunnel's network, and is public at
 (one-time PIN). The container also verifies the Access JWT itself, so a
 sibling container on the shared network can't reach it unauthenticated.
 
+## View-only architecture (box hosts, Mac generates)
+
+Letterboxd is behind Cloudflare bot management that serves a JS challenge to
+the **box's** server IP, so live scraping from the box fails. Graham's Mac has
+a residential IP that is not challenged. So the box runs in **view-only mode**
+(`TASTE_TWIN_VIEWER_MODE=1`) — a read-only gallery of pre-generated reports:
+the homepage username form is hidden, `POST /run` is refused, and no background
+worker or ~600 MB dataset ingest runs (so `pool.db` isn't even required on the
+box). New reports are generated on the Mac and pushed over:
+
+```bash
+# On Graham's Mac, from the repo root (residential IP, full mode):
+python scripts/publish.py <letterboxd_username>
+#   [--box graham@100.101.1.28] [--container taste-twin]
+#   [--url-base https://taste-twin.graham-williams.com]
+```
+
+`publish.py` validates the username (same rule as the app), runs the pipeline
+locally (`python -m tastetwin run <user>`), then copies just `report.html` +
+`matches_verified.json` into the container's `data/runs/<user>/`, clears any
+stale job state so the UI shows a completed run, and prints the public URL. It
+uses only subprocess arg lists (never a shell), since the username reaches
+ssh/docker/scp. Requires SSH access to the box and Docker there.
+
+`TASTE_TWIN_VIEWER_MODE` is set to `"1"` in `docker-compose.yml` (and mirrored
+in `.env.example`). To run a full, self-scraping instance instead (e.g. local
+dev on a residential IP), leave the flag unset/`0`.
+
 ## Layout on the box
 
 - Repo checkout: `~/taste-twin` (deploy from `main` only)
@@ -31,6 +59,10 @@ a restart kills the running job (it is marked failed with a Re-run button;
 the week-long HTTP cache makes the re-run cheap).
 
 ## First boot (one-time)
+
+**In view-only mode (the box default) there is no first-boot ingest** — no
+worker runs and `pool.db` is never built or required. This section applies only
+to a **full-mode** instance (`TASTE_TWIN_VIEWER_MODE` unset/`0`).
 
 `data/pool.db` is missing on a fresh volume, so the worker automatically
 downloads the CC0 Kaggle dataset (~600 MB, anonymous — no Kaggle account)

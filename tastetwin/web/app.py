@@ -38,10 +38,28 @@ _CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; "
         "base-uri 'none'; object-src 'none'")
 
+# View-only message shown when a POST /run is refused in viewer mode.
+VIEWER_ONLY_MESSAGE = (
+    "This site is view-only — new taste-twin reports are generated on request. "
+    "Browse the existing reports below.")
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
 
 def create_app(data_dir: str | Path | None = None, runner=None,
                start_worker: bool = True) -> Flask:
-    """App factory. `runner`/`start_worker` exist for tests."""
+    """App factory. `runner`/`start_worker` exist for tests.
+
+    Viewer mode (env ``TASTE_TWIN_VIEWER_MODE`` truthy) turns the app into a
+    read-only report gallery: the homepage hides the username form, ``POST
+    /run`` refuses to enqueue, and no background worker / dataset ingest runs.
+    This is how the deployed box instance runs — Letterboxd's Cloudflare bot
+    management challenges the box's server IP, so live scraping happens on a
+    residential IP (Graham's Mac) and reports are synced to the box (see
+    ``scripts/publish.py``). Default OFF: full-mode behavior is unchanged.
+    """
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO,
                             format="%(asctime)s %(levelname)s %(message)s",
@@ -67,11 +85,23 @@ def create_app(data_dir: str | Path | None = None, runner=None,
         log.warning("APP_HOST not set — Host/Origin pinning disabled "
                     "(local dev mode only).")
 
+    viewer_mode = _env_truthy("TASTE_TWIN_VIEWER_MODE")
+    if viewer_mode:
+        log.info("TASTE_TWIN_VIEWER_MODE enabled — read-only gallery: no "
+                 "username form, POST /run refused, no worker/ingest started.")
+
     manager = JobManager(data_dir, runner=runner)
     manager.recover()
-    if start_worker:
+    # In viewer mode nothing is ever enqueued, so we never start the worker
+    # thread — that also means the ~600MB dataset ingest is never triggered
+    # and the app boots cleanly even if pool.db is absent.
+    if start_worker and not viewer_mode:
         manager.start()
     app.extensions["tastetwin_jobs"] = manager
+
+    @app.context_processor
+    def _inject_viewer_mode():
+        return {"viewer_mode": viewer_mode}
 
     @app.template_filter("datetime")
     def _fmt_datetime(ts) -> str:
@@ -148,6 +178,14 @@ def create_app(data_dir: str | Path | None = None, runner=None,
 
     @app.post("/run")
     def start_run():
+        # Auth + Host/CSRF pin already ran in before_request. In viewer mode we
+        # refuse to enqueue (no live jobs on the box) but still render the
+        # gallery so the visitor lands somewhere useful.
+        if viewer_mode:
+            return render_template("index.html", runs=manager.list_runs(),
+                                   pool_state=manager.pool_state,
+                                   max_len=MAX_USERNAME_LEN,
+                                   error=VIEWER_ONLY_MESSAGE), 403
         job, error = manager.enqueue(request.form.get("username", ""))
         if job is None:
             return render_template("index.html", runs=manager.list_runs(),

@@ -16,6 +16,12 @@ services:
       CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:?set in .env on the box}
       APP_HOST: taste-twin.graham-williams.com
       APP_ENV: prod
+      # View-only gallery: Letterboxd's Cloudflare bot-management challenges
+      # the box's server IP, so live scraping fails here. New reports are
+      # generated on Graham's Mac (residential IP) and synced over with
+      # scripts/publish.py; the box only serves them. Viewer mode hides the
+      # username form, refuses POST /run, and skips the worker/dataset ingest.
+      TASTE_TWIN_VIEWER_MODE: "1"
     volumes:
       - taste-twin-data:/app/data
     networks:

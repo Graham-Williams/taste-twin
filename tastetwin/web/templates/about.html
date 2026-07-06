@@ -7,6 +7,10 @@
   <p>taste-twin finds Letterboxd members whose movie taste is most similar to
   yours, using <strong>public data only</strong>.</p>
   <p>{{ methodology }}</p>
+  {% if viewer_mode %}
+  <p class="muted">This instance shows pre-generated reports; new reports are
+  produced on request rather than through a live form here.</p>
+  {% endif %}
 </div>
 
 <h2>How a run works</h2>
