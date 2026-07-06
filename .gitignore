@@ -1,9 +1,10 @@
 # Data & caches (scraped pages, progress state, reports)
 data/
 
-# Environment / secrets (none expected, but never commit them)
+# Environment / secrets (never commit them; .env.example holds placeholders)
 .env
 .env.*
+!.env.example
 
 # Python
 __pycache__/
