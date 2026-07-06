@@ -94,6 +94,10 @@ def validate_username(username: str) -> str:
     if not is_valid_name(username):
         raise PublishError(
             "Invalid username — only letters, digits, '_' and '-' are allowed.")
+    if username.startswith("-"):
+        # Real Letterboxd usernames never start with '-'. Reject it so the name
+        # can't be mistaken for an option flag by the local `tastetwin run` CLI.
+        raise PublishError("Username may not start with '-'.")
     return username
 
 

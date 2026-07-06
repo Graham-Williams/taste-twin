@@ -53,6 +53,24 @@ def test_validate_accepts_good(good):
     assert publish.validate_username(good) == good
 
 
+@pytest.mark.parametrize("dashed", ["-x", "--help", "-rf"])
+def test_validate_rejects_leading_dash(dashed):
+    # Charset-valid but would look like an option flag to the local CLI.
+    with pytest.raises(publish.PublishError):
+        publish.validate_username(dashed)
+
+
+def test_main_refuses_leading_dash_name_no_subprocess(monkeypatch):
+    # Pass via "--" so argparse treats "-x" as the positional username, not a
+    # flag — validation must then refuse it before any command is built.
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run",
+                        lambda *a, **k: calls.append((a, k)))
+    rc = publish.main(["--", "-x"])
+    assert rc == 1
+    assert calls == []
+
+
 @pytest.mark.parametrize("bad", HOSTILE)
 def test_main_never_invokes_subprocess_for_bad_name(bad, monkeypatch):
     calls = []
