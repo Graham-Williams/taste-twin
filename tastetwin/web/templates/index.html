@@ -7,6 +7,7 @@
 <div class="card error">{{ error }}</div>
 {% endif %}
 
+{% if not viewer_mode %}
 {% if pool_state == 'building' %}
 <div class="card"><strong>One-time setup in progress:</strong> downloading and
   indexing the candidate-pool dataset (~600&nbsp;MB). New runs will wait in the
@@ -29,6 +30,13 @@
     live verification of the top matches runs at a polite 1 request/second,
     so a run usually takes 30&ndash;90 minutes. Runs are queued one at a time.</p>
 </div>
+{% else %}
+<div class="card">
+  <p>This is a curated, view-only gallery of taste-twin reports. New reports
+  are generated on request rather than through a live form here — browse the
+  finished reports below.</p>
+</div>
+{% endif %}
 
 <h2>Runs</h2>
 {% if runs %}

@@ -138,6 +138,39 @@ generated report.html inline), `/about` (methodology), `/healthz`
   (validation, pinning, report serving), `tests/test_web_jobs.py` (queue
   semantics with a mocked runner).
 
+### Viewer mode / box-hosts-Mac-generates (keep this invariant)
+
+Letterboxd sits behind Cloudflare bot management that serves a JS challenge to
+the **box's** datacenter/server IP, so live scraping *from the box* fails. A
+residential IP (Graham's Mac) is not challenged. So the architecture is: the
+deployed box instance is a **view-only report gallery**, and new reports are
+generated on the Mac and synced to the box.
+
+- **Env flag `TASTE_TWIN_VIEWER_MODE`** (truthy = on; `1/true/yes/on`), read in
+  `create_app`. **Default OFF** — full mode and all existing tests are
+  unchanged. The box's `docker-compose.yml` sets it to `"1"`.
+- When ON: the homepage `/` **hides the username form** (shows a short note
+  instead) but keeps the runs gallery + report viewer as-is; `POST /run` does
+  **not** enqueue and returns **HTTP 403** with a view-only message (the CF
+  Access + `APP_HOST`/CSRF pin still run first in `before_request` — security is
+  not loosened); the **worker thread is never started**, so the ~600MB dataset
+  ingest is never triggered and the app boots cleanly even if `pool.db` is
+  absent; `/about` gains a one-line "pre-generated reports" note. All other
+  routes (`/report/<user>`, gallery, `/healthz`) are identical.
+- **Mac-side publisher: `scripts/publish.py`** (stdlib only, executable). Run on
+  the Mac: `python scripts/publish.py <username> [--box graham@100.101.1.28]
+  [--container taste-twin] [--url-base ...]`. It (1) validates the username with
+  the app's own `tastetwin.scraper.is_valid_name` + 64-char bound *before* the
+  value touches any command, (2) runs `sys.executable -m tastetwin run <user>`
+  locally, (3) scp's ONLY `report.html` + `matches_verified.json` (never the big
+  `matches_dataset.json`) to a box temp dir, `docker cp`s them into
+  `<container>:/app/data/runs/<key>/`, removes any stale `job.json`/`job.log`
+  there (so the UI synthesizes a "done" run), cleans up, and (4) prints the
+  public URL. **Security-critical:** the username flows into ssh/docker/scp
+  commands, so every subprocess is built as an **arg list** — never `shell=True`,
+  never shell-string interpolation. Tests: `tests/test_web_viewer.py`,
+  `tests/test_publish.py`.
+
 Deployment (Docker, Cloudflare tunnel + Access, first-boot ingest) is
 documented in `DEPLOY.md`.
 

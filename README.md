@@ -131,6 +131,18 @@ and verifies the Access JWT in-app when `CF_ACCESS_AUD` +
 `CF_ACCESS_TEAM_DOMAIN` are set (plus a Host/Origin pin via `APP_HOST`).
 See `DEPLOY.md` for the runbook.
 
+### View-only mode
+
+Set **`TASTE_TWIN_VIEWER_MODE=1`** to run the app as a read-only report
+gallery: the homepage hides the username form, `POST /run` is refused, and no
+background worker or dataset ingest runs (so `pool.db` isn't needed). This is
+how the hosted instance runs, because Letterboxd's Cloudflare bot management
+challenges a server IP and blocks live scraping from the box. New reports are
+generated on a residential-IP machine and pushed to the box with
+`scripts/publish.py <username>` (which runs the pipeline locally, then copies
+`report.html` + `matches_verified.json` into the container). The flag defaults
+off, so a normal full-mode instance is unchanged. See `DEPLOY.md`.
+
 ## Politeness policy
 
 This project only reads public pages, and does so gently:
