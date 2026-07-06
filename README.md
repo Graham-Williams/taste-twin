@@ -26,11 +26,15 @@ per-user z-score normalization (so a harsh 3-star-max rater can still match a
 generous 5-star rater), with significance weighting
 (`score = r * min(overlap, 50) / 50`) so tiny overlaps can't win.
 
+taste-twin can be used two ways: a **CLI** (below) or a small self-hostable
+**web app** (see [Web app](#web-app)).
+
 ## Requirements
 
 - Python 3.11+
-- `requests`, `beautifulsoup4`, `kagglehub` (see `requirements.txt`);
-  dev/test tooling (`pytest`) lives in `requirements-dev.txt`
+- `requests`, `beautifulsoup4`, `kagglehub`, plus `flask` / `gunicorn` /
+  `PyJWT` for the web app (see `requirements.txt`); dev/test tooling
+  (`pytest`) lives in `requirements-dev.txt`
 - ~2.3 GB disk for the dataset + SQLite pool. The `kagglehub` download is
   cached under `~/.cache/kagglehub/`; `data/` (gitignored) holds the built
   `data/pool.db` and, only if you use the manual fallback, the CSVs in
@@ -101,6 +105,32 @@ python -m tastetwin analyze <user>                # merges them into the ranking
 Fair warning: collecting a 1000-user scraped pool at 1 request/second takes
 **hours**. The collector is resumable (progress is saved per candidate).
 
+## Web app
+
+A minimal Flask app wraps the same pipeline — no JavaScript frameworks, just
+server-rendered pages with meta-refresh polling:
+
+- `/` — completed runs + a form to start a new run for any username
+- `POST /run` — enqueue an analysis (FIFO queue, one job at a time — the
+  1 req/s politeness budget is global, so jobs never scrape concurrently)
+- `/run/<username>` — live status: queue position, current stage, log tail
+- `/report/<username>` — the generated `report.html`
+- `/about` — plain-English methodology
+
+Local dev (unauthenticated; the app logs a warning):
+
+```bash
+flask --app tastetwin.web run --port 8080
+```
+
+For self-hosting there's a `Dockerfile` + `docker-compose.yml` (gunicorn,
+non-root, single worker process, all state in a `data/` volume; the first
+boot ingests the Kaggle dataset automatically). The app is designed to sit
+behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/)
+and verifies the Access JWT in-app when `CF_ACCESS_AUD` +
+`CF_ACCESS_TEAM_DOMAIN` are set (plus a Host/Origin pin via `APP_HOST`).
+See `DEPLOY.md` for the runbook.
+
 ## Politeness policy
 
 This project only reads public pages, and does so gently:
@@ -121,7 +151,9 @@ python -m pytest
 ```
 
 Parsing tests run against saved HTML fixtures (no network); similarity tests
-use hand-computed cases; ingest tests use synthetic CSVs.
+use hand-computed cases; ingest tests use synthetic CSVs; web tests cover the
+Access-JWT middleware (against a fake JWKS), host pinning, input validation,
+report serving, and queue semantics with a mocked pipeline.
 
 ## Credits
 

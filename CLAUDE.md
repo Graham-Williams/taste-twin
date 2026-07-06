@@ -20,6 +20,8 @@ user-facing overview.
   for this public dataset WITHOUT Kaggle credentials); dev deps in
   `requirements-dev.txt` (`pytest`). Similarity math is stdlib — no
   numpy/pandas.
+- Web deps: `flask` (app), `gunicorn` (serving), `PyJWT[crypto]`
+  (Cloudflare Access JWT verification).
 - Package `tastetwin/`:
   - `scraper.py` — polite HTTP (PoliteSession: 1 req/s, UA, backoff,
     disk cache, robots.txt) + HTML parsing. Selector notes live in its
@@ -38,7 +40,15 @@ user-facing overview.
     discovery (obscure-favorite seeds → film members pages); no longer the
     default path; analyze merges any collected scraped users automatically.
   - `report.py` — report.md + standalone report.html (inline CSS).
-  - `__main__.py` — CLI.
+  - `pipeline.py` — the stage implementations (fetch/analyze/verify/
+    discover/collect + `run_full`), shared by the CLI and the web app.
+    Stages raise `PipelineError` (never `sys.exit`) on user-visible
+    failures.
+  - `__main__.py` — CLI (argparse; catches `PipelineError`).
+  - `web/` — Flask app (see "Web app" below): `app.py` (factory
+    `create_app`, routes, security middleware), `auth.py` (Cloudflare
+    Access JWT verification, JWKS cached with TTL), `jobs.py`
+    (`JobManager`: FIFO queue + single worker thread), `templates/`.
 - All bulky/local state under `data/` (gitignored): `cache/` (HTTP),
   `pool.db`, `dataset/` (manual-fallback CSVs only), `runs/<user>/`
   (target.json, matches_*.json, report.md/html). Exception: the raw
@@ -75,7 +85,61 @@ user-facing overview.
   Markdown (headings, bare URLs) out of its link text. Regression tests
   in `tests/test_report.py` and `tests/test_security.py`.
 - Untrusted names used as path components go through `util.safe_filename`
-  (shared by `collect.py` and `__main__.py`).
+  (shared by `collect.py`, `pipeline.py`, and the web app).
+
+## Web app (keep these invariants too)
+
+`tastetwin/web/` wraps the pipeline in a small Flask app (server-rendered,
+meta-refresh polling, no JS). Routes: `/` (runs list + start form),
+`POST /run` (enqueue), `/run/<username>` (live status: queue position /
+stage / log tail / re-run on failure), `/report/<username>` (serves the
+generated report.html inline), `/about` (methodology), `/healthz`
+(unauthenticated healthcheck, leaks nothing).
+
+- **Queue:** ONE worker thread, strict FIFO, one job at a time, pending
+  cap 5 (`jobs.MAX_PENDING`) — the 1 req/s politeness budget is global to
+  the process, so jobs must never scrape concurrently. Consequently
+  gunicorn runs with `--workers 1` (threads for request concurrency) and
+  no `--max-requests`. Never scale to multiple processes/replicas without
+  moving the queue out of process.
+- **Job state** persists to `data/runs/<user>/job.json` + `job.log`; on
+  boot `JobManager.recover()` marks jobs left queued/running by a dead
+  process as failed (UI offers Re-run; the HTTP cache makes that cheap).
+  First boot: the worker ingests the Kaggle dataset automatically if
+  `data/pool.db` is missing (in Docker, `KAGGLEHUB_CACHE` points inside
+  the `data/` volume). A hard ingest failure is **latched** (`_pool_failed`):
+  the ~600MB download is not re-attempted on every subsequent job — jobs
+  fail fast with a manual-fallback hint until an operator rebuilds
+  `pool.db` and restarts.
+- **Memory bound:** the in-memory `_jobs` map keeps all active/pending jobs
+  plus at most `MAX_TERMINAL_JOBS` (100) most-recent terminal (done/failed)
+  jobs; older terminal jobs are evicted from memory but remain on disk
+  (`job.json`) and are re-read on demand by `get`/`list_runs`, so a
+  long-lived process can't grow unbounded.
+- **Auth:** no built-in auth. When `CF_ACCESS_AUD` + `CF_ACCESS_TEAM_DOMAIN`
+  are set, every route except `/healthz` requires a valid Cloudflare
+  Access JWT (`Cf-Access-Jwt-Assertion` header or `CF_Authorization`
+  cookie): signature vs the team JWKS (cached 1 h, stale-on-refresh-failure,
+  otherwise fail CLOSED), plus `aud`/`iss`/`exp` checks. Both vars unset =
+  dev mode with a loud log warning. `APP_HOST`, when set, pins the Host
+  header on all routes and enforces CSRF on POSTs: the request must carry a
+  same-origin signal that matches `APP_HOST` — a matching `Origin` (checked
+  alone when present) or, when `Origin` is absent, a same-host `Referer`. A
+  POST with neither → 403.
+- **Input:** the only user input is the username — validated with
+  `scraper.is_valid_name` (+ a 64-char bound) before ANY use, and passed
+  through `util.safe_filename` before touching paths. `/report/` serves
+  only the fixed filename `report.html` under the sanitized run dir, with
+  a resolved-path containment check. Jinja autoescape stays on; nothing
+  remote-derived is ever `|safe`. Security headers set on every response:
+  CSP (`default-src 'self'`, incl. `base-uri 'none'` + `object-src 'none'`),
+  nosniff, X-Frame-Options DENY, Referrer-Policy no-referrer.
+- Web tests: `tests/test_web_auth.py` (JWT/JWKS), `tests/test_web_routes.py`
+  (validation, pinning, report serving), `tests/test_web_jobs.py` (queue
+  semantics with a mocked runner).
+
+Deployment (Docker, Cloudflare tunnel + Access, first-boot ingest) is
+documented in `DEPLOY.md`.
 
 ## Run / test
 
@@ -97,8 +161,15 @@ python -m tastetwin verify <user> [--verify-top N] [--max-pages N]
 python -m tastetwin discover <user> [--pool N]
 python -m tastetwin collect <user>
 
-# tests — fixtures + hand-computed math + synthetic-CSV ingest; no network
+# tests — fixtures + hand-computed math + synthetic-CSV ingest + web
+# (fake JWKS, mocked pipeline runner); no network
 python -m pytest
+
+# web app, local dev (unauthenticated — logs a warning)
+flask --app tastetwin.web run --port 8080
+
+# web app, production-style
+gunicorn --workers 1 --threads 8 -b 0.0.0.0:8080 "tastetwin.web:create_app()"
 ```
 
 Smoke-test recipe (small + polite): `fetch <user>` → `analyze <user>` →

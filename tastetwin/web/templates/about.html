@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}taste-twin — about{% endblock %}
+{% block content %}
+<h1>About &amp; methodology</h1>
+
+<div class="card">
+  <p>taste-twin finds Letterboxd members whose movie taste is most similar to
+  yours, using <strong>public data only</strong>.</p>
+  <p>{{ methodology }}</p>
+</div>
+
+<h2>How a run works</h2>
+<p>Your current public ratings are fetched live, compared against every user
+in the dataset pool (seconds, offline), and then the top-ranked matches are
+<em>re-verified</em> against their current public ratings — dropping accounts
+that have since gone private or changed taste. Verification is the slow part:
+it runs at a strict 1 request/second with an identifying User-Agent, honors
+robots.txt and rate-limit headers, and caches every page for a week so re-runs
+cost almost nothing.</p>
+
+<h2>Data</h2>
+<p>The candidate pool is the CC0 Kaggle dataset
+<span class="muted">freeth/letterboxd-film-ratings</span> (~11,000 of
+Letterboxd's most active members, ~18.2M ratings, October 2023 snapshot). On
+first boot the app downloads it once (~600&nbsp;MB) and builds a local SQLite
+index. If the automatic download fails, place <code>ratings.csv</code> and
+<code>films.csv</code> in <code>data/dataset/</code> and re-run.</p>
+
+<p class="muted">This is a personal project and is not affiliated with
+Letterboxd.</p>
+{% endblock %}

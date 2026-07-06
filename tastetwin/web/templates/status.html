@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}run — {{ username }}{% endblock %}
+{% block head %}{% if refresh %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block content %}
+<h1>Run: {{ username }}</h1>
+
+{% if job %}
+<div class="card {% if job.status == 'failed' %}error{% endif %}">
+  <p><span class="badge {{ job.status }}">{{ job.status }}</span></p>
+
+  {% if job.status == 'queued' %}
+    {% if pool_state == 'building' %}
+      <p>Waiting for the one-time dataset ingest to finish, then
+         {% if position %}#{{ position }} in the queue.{% else %}up next.{% endif %}</p>
+    {% elif position %}
+      <p>Position <strong>#{{ position }}</strong> in the queue.</p>
+    {% else %}
+      <p>Up next.</p>
+    {% endif %}
+  {% elif job.status == 'running' %}
+    <p>Stage: <strong>{{ job.stage or 'starting' }}</strong></p>
+    {% if job.detail %}<p class="muted">{{ job.detail }}</p>{% endif %}
+  {% elif job.status == 'done' %}
+    <p>Finished.
+       {% if report_exists %}<a href="{{ url_for('report', username=username) }}">View the report &rarr;</a>
+       {% else %}No matches met the overlap threshold, so no report was
+       generated.{% endif %}</p>
+  {% elif job.status == 'failed' %}
+    <p><strong>Failed:</strong> {{ job.error }}</p>
+    <form method="post" action="{{ url_for('start_run') }}">
+      <input type="hidden" name="username" value="{{ username }}">
+      <button type="submit">Re-run</button>
+    </form>
+  {% endif %}
+</div>
+{% elif report_exists %}
+<div class="card">
+  <p><span class="badge done">done</span></p>
+  <p><a href="{{ url_for('report', username=username) }}">View the report &rarr;</a></p>
+</div>
+{% endif %}
+
+{% if log_lines %}
+<h2>Log</h2>
+<pre class="log">{% for line in log_lines %}{{ line }}
+{% endfor %}</pre>
+{% endif %}
+
+{% if refresh %}<p class="muted">This page refreshes every 3 seconds.</p>{% endif %}
+{% endblock %}

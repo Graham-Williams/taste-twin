@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}taste-twin — runs{% endblock %}
+{% block content %}
+<h1>Find your Letterboxd taste twin</h1>
+
+{% if error %}
+<div class="card error">{{ error }}</div>
+{% endif %}
+
+{% if pool_state == 'building' %}
+<div class="card"><strong>One-time setup in progress:</strong> downloading and
+  indexing the candidate-pool dataset (~600&nbsp;MB). New runs will wait in the
+  queue until it finishes.</div>
+{% elif pool_state.startswith('error') %}
+<div class="card error"><strong>Dataset ingest failed.</strong>
+  <span class="muted">{{ pool_state }}</span> — it will be retried on the next
+  run; see <a href="{{ url_for('about') }}">about</a> for the manual fallback.</div>
+{% endif %}
+
+<div class="card">
+  <form method="post" action="{{ url_for('start_run') }}">
+    <label for="username">Letterboxd username</label><br>
+    <input type="text" id="username" name="username" required
+           maxlength="{{ max_len }}" pattern="[A-Za-z0-9_-]+"
+           placeholder="e.g. mhgaillo" autocomplete="off">
+    <button type="submit">Find taste twins</button>
+  </form>
+  <p class="muted">Analysis vs the ~11k-user dataset pool takes seconds; the
+    live verification of the top matches runs at a polite 1 request/second,
+    so a run usually takes 30&ndash;90 minutes. Runs are queued one at a time.</p>
+</div>
+
+<h2>Runs</h2>
+{% if runs %}
+<table>
+  <tr><th>user</th><th>status</th><th>date</th><th>top match</th><th>report</th></tr>
+  {% for r in runs %}
+  <tr>
+    <td><a href="{{ url_for('run_status', username=r.username) }}">{{ r.username }}</a></td>
+    <td><span class="badge {{ r.status }}">{{ r.status }}</span>
+        {% if r.position %}<span class="muted">#{{ r.position }} in queue</span>{% endif %}</td>
+    <td class="muted">{{ ((r.finished_at or r.created_at) | int) | datetime }}</td>
+    <td>{% if r.top_match %}{{ r.top_match }}{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+    <td>{% if r.has_report %}<a href="{{ url_for('report', username=r.username) }}">view</a>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No runs yet — start one above.</p>
+{% endif %}
+{% endblock %}

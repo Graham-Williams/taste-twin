@@ -1,0 +1,36 @@
+# taste-twin, self-hosted behind the existing Cloudflare tunnel.
+#
+# - Joins the external `km-tracker_default` network so the tunnel can route
+#   taste-twin.graham-williams.com -> http://taste-twin:8080 by service name.
+# - NO host port mapping: the app is reachable only over that network, and
+#   every request must carry a Cloudflare Access JWT (verified in-app via
+#   CF_ACCESS_AUD + CF_ACCESS_TEAM_DOMAIN, from the box's untracked .env).
+# - All state lives in the named volume `taste-twin-data`.
+services:
+  taste-twin:
+    build: .
+    container_name: taste-twin
+    restart: unless-stopped
+    environment:
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:?set in .env on the box}
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:?set in .env on the box}
+      APP_HOST: taste-twin.graham-williams.com
+      APP_ENV: prod
+    volumes:
+      - taste-twin-data:/app/data
+    networks:
+      - km-tracker_default
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  taste-twin-data:
+
+networks:
+  km-tracker_default:
+    external: true
