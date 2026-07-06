@@ -35,7 +35,8 @@ from .jobs import MAX_USERNAME_LEN, JobManager
 log = logging.getLogger("tastetwin.web")
 
 _CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'")
+        "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; "
+        "base-uri 'none'; object-src 'none'")
 
 
 def create_app(data_dir: str | Path | None = None, runner=None,
@@ -101,9 +102,21 @@ def create_app(data_dir: str | Path | None = None, runner=None,
         if request.host.split(":", 1)[0].lower() != app_host:
             abort(403)
         if request.method == "POST":
+            # CSRF defense: a state-changing POST must carry at least one
+            # same-origin signal that matches app_host. Origin is the most
+            # trustworthy — if present it alone must match. When Origin is
+            # absent (some browsers omit it) fall back to a same-host
+            # Referer. A POST carrying NEITHER cannot be proven same-origin,
+            # so it is rejected.
             origin = request.headers.get("Origin", "")
-            if origin and (urlsplit(origin).hostname or "").lower() \
-                    != app_host:
+            referer = request.headers.get("Referer", "")
+            if origin:
+                if (urlsplit(origin).hostname or "").lower() != app_host:
+                    abort(403)
+            elif referer:
+                if (urlsplit(referer).hostname or "").lower() != app_host:
+                    abort(403)
+            else:
                 abort(403)
         return None
 

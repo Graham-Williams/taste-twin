@@ -107,21 +107,33 @@ generated report.html inline), `/about` (methodology), `/healthz`
   process as failed (UI offers Re-run; the HTTP cache makes that cheap).
   First boot: the worker ingests the Kaggle dataset automatically if
   `data/pool.db` is missing (in Docker, `KAGGLEHUB_CACHE` points inside
-  the `data/` volume).
+  the `data/` volume). A hard ingest failure is **latched** (`_pool_failed`):
+  the ~600MB download is not re-attempted on every subsequent job — jobs
+  fail fast with a manual-fallback hint until an operator rebuilds
+  `pool.db` and restarts.
+- **Memory bound:** the in-memory `_jobs` map keeps all active/pending jobs
+  plus at most `MAX_TERMINAL_JOBS` (100) most-recent terminal (done/failed)
+  jobs; older terminal jobs are evicted from memory but remain on disk
+  (`job.json`) and are re-read on demand by `get`/`list_runs`, so a
+  long-lived process can't grow unbounded.
 - **Auth:** no built-in auth. When `CF_ACCESS_AUD` + `CF_ACCESS_TEAM_DOMAIN`
   are set, every route except `/healthz` requires a valid Cloudflare
   Access JWT (`Cf-Access-Jwt-Assertion` header or `CF_Authorization`
   cookie): signature vs the team JWKS (cached 1 h, stale-on-refresh-failure,
   otherwise fail CLOSED), plus `aud`/`iss`/`exp` checks. Both vars unset =
   dev mode with a loud log warning. `APP_HOST`, when set, pins the Host
-  header on all routes and the Origin header on POSTs (CSRF defense).
+  header on all routes and enforces CSRF on POSTs: the request must carry a
+  same-origin signal that matches `APP_HOST` — a matching `Origin` (checked
+  alone when present) or, when `Origin` is absent, a same-host `Referer`. A
+  POST with neither → 403.
 - **Input:** the only user input is the username — validated with
   `scraper.is_valid_name` (+ a 64-char bound) before ANY use, and passed
   through `util.safe_filename` before touching paths. `/report/` serves
   only the fixed filename `report.html` under the sanitized run dir, with
   a resolved-path containment check. Jinja autoescape stays on; nothing
-  remote-derived is ever `|safe`. Security headers (CSP, nosniff,
-  X-Frame-Options) are set on every response.
+  remote-derived is ever `|safe`. Security headers set on every response:
+  CSP (`default-src 'self'`, incl. `base-uri 'none'` + `object-src 'none'`),
+  nosniff, X-Frame-Options DENY, Referrer-Policy no-referrer.
 - Web tests: `tests/test_web_auth.py` (JWT/JWKS), `tests/test_web_routes.py`
   (validation, pinning, report serving), `tests/test_web_jobs.py` (queue
   semantics with a mocked runner).

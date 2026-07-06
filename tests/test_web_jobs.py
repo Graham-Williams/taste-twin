@@ -230,6 +230,63 @@ def test_ingest_failure_reported(data_dir, monkeypatch):
         mgr.stop()
 
 
+def test_failed_ingest_is_latched_no_redownload(data_dir, monkeypatch):
+    # Ingest fails hard on first attempt; subsequent jobs must fail fast
+    # WITHOUT re-triggering the ~600MB download.
+    (data_dir / "pool.db").unlink()
+    calls = {"n": 0}
+
+    def fake_ingest(d):
+        calls["n"] += 1
+        raise SystemExit("kaggle download failed")
+
+    monkeypatch.setattr(jobs_mod, "ensure_pool_db", fake_ingest)
+    mgr = JobManager(data_dir, runner=lambda job: None)
+    mgr.start()
+    try:
+        assert wait_until(lambda: mgr.pool_state.startswith("error"))
+        # Startup ingest attempt counts as the single download.
+        assert calls["n"] == 1
+
+        # Two subsequent jobs both fail fast with the manual-fallback hint.
+        for user in ("firstjob", "secondjob"):
+            mgr.enqueue(user)
+            assert wait_until(lambda u=user: mgr.get(u).status == "failed")
+            assert "operator" in mgr.get(user).error
+
+        # The downloader was never called again after the latched failure.
+        assert calls["n"] == 1
+    finally:
+        mgr.stop()
+
+
+def test_terminal_jobs_evicted_beyond_cap(data_dir):
+    # With a small cap, older done jobs are dropped from the in-memory map
+    # but remain retrievable from disk; the cap bounds memory growth.
+    mgr = JobManager(data_dir, runner=lambda job: None, max_terminal_jobs=3)
+    mgr.start()
+    try:
+        users = [f"user{i}" for i in range(7)]
+        for u in users:
+            mgr.enqueue(u)
+        assert wait_until(
+            lambda: all(mgr.get(u).status == "done" for u in users))
+        # In-memory terminal jobs capped at 3.
+        with mgr._cond:
+            in_memory = [j for j in mgr._jobs.values()
+                         if j.status in ("done", "failed")]
+        assert len(in_memory) <= 3
+        # Something was actually evicted (7 ran, at most 3 kept).
+        assert len(in_memory) < len(users)
+        # Every run is still retrievable (evicted ones re-read from disk).
+        for u in users:
+            assert mgr.get(u).status == "done"
+        # Homepage runs-list still shows all of them.
+        assert {r["username"] for r in mgr.list_runs()} >= set(users)
+    finally:
+        mgr.stop()
+
+
 def test_list_runs_merges_disk_and_memory(data_dir):
     # A finished CLI run on disk (no job.json) ...
     cli_dir = data_dir / "runs" / "cliuser"

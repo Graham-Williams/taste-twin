@@ -35,8 +35,19 @@ log = logging.getLogger("tastetwin.web")
 MAX_PENDING = 5
 MAX_USERNAME_LEN = 64  # Letterboxd's own cap is 15; this is just a bound
 
+# Cap on how many terminal (done/failed) jobs we keep in memory. All
+# active/pending jobs are always retained; older terminal ones are evicted
+# from the in-memory map but remain on disk (job.json) and are re-read on
+# demand, so a long-lived process can't grow the map without bound.
+MAX_TERMINAL_JOBS = 100
+
 INTERRUPTED_ERROR = ("interrupted by an app restart — hit Re-run "
                      "(cached pages make re-runs cheap)")
+
+POOL_UNAVAILABLE_ERROR = ("the movie dataset could not be loaded and won't "
+                          "be retried automatically — an operator must "
+                          "rebuild data/pool.db (see README) and restart the "
+                          "app")
 
 # Job parameters (web runs use the CLI defaults).
 VERIFY_TOP = 50
@@ -90,15 +101,18 @@ class JobManager:
     """FIFO queue + single worker thread around the pipeline."""
 
     def __init__(self, data_dir: Path, runner=None,
-                 max_pending: int = MAX_PENDING):
+                 max_pending: int = MAX_PENDING,
+                 max_terminal_jobs: int = MAX_TERMINAL_JOBS):
         self.data_dir = Path(data_dir)
         self.max_pending = max_pending
+        self.max_terminal_jobs = max_terminal_jobs
         self._runner = runner or self._run_pipeline
         self._jobs: dict[str, Job] = {}
         self._pending: deque[str] = deque()
         self._cond = threading.Condition()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._pool_failed = False  # latch: hard ingest failure, don't retry
         self.pool_state = "ready" if self.pool_db_path.exists() else "missing"
 
     @property
@@ -252,18 +266,30 @@ class JobManager:
         except (OSError, json.JSONDecodeError, TypeError):
             return None
 
-    def _ensure_pool(self) -> None:
+    def _ensure_pool(self) -> bool:
+        """Ensure ``pool.db`` exists; return True if the pool is ready.
+
+        The one-time Kaggle ingest is a ~600MB download. If it fails hard we
+        latch the failure (``_pool_failed``) so we never re-attempt that
+        download on every subsequent job — jobs fail fast with a manual
+        fallback hint until an operator rebuilds the pool and restarts.
+        """
         if self.pool_db_path.exists():
             self.pool_state = "ready"
-            return
+            return True
+        if self._pool_failed:
+            return False  # latched — fail fast, no re-download
         self.pool_state = "building"
         log.info("pool.db missing — running one-time dataset ingest")
         try:
             ensure_pool_db(self.data_dir)
             self.pool_state = "ready"
+            return True
         except (Exception, SystemExit) as exc:  # noqa: BLE001
+            self._pool_failed = True
             self.pool_state = f"error: {exc}"
-            log.error("dataset ingest failed: %s", exc)
+            log.error("dataset ingest failed (latched, won't retry): %s", exc)
+            return False
 
     def _worker(self) -> None:
         self._ensure_pool()
@@ -279,6 +305,8 @@ class JobManager:
                 job.started_at = time.time()
             self._persist(job)
             try:
+                if not self._ensure_pool():
+                    raise pipeline.PipelineError(POOL_UNAVAILABLE_ERROR)
                 self._runner(job)
                 job.status = "done"
                 job.stage = "report"
@@ -291,6 +319,25 @@ class JobManager:
                 log.exception("job for %r crashed", job.username)
             job.finished_at = time.time()
             self._persist(job)
+            with self._cond:
+                self._evict_terminal()
+
+    def _evict_terminal(self) -> None:
+        """Cap the in-memory job map (call under ``self._cond``).
+
+        Keep every active/pending job plus the most recent
+        ``max_terminal_jobs`` terminal (done/failed) ones. Older terminal
+        jobs are dropped from memory but persist on disk (``job.json``), so
+        ``get`` / ``list_runs`` re-read them on demand — nothing is lost.
+        """
+        terminal = [j for j in self._jobs.values()
+                    if j.status in ("done", "failed")]
+        if len(terminal) <= self.max_terminal_jobs:
+            return
+        terminal.sort(key=lambda j: (j.finished_at or j.created_at),
+                      reverse=True)
+        for job in terminal[self.max_terminal_jobs:]:
+            self._jobs.pop(job.key, None)
 
     def _run_pipeline(self, job: Job) -> None:
         """Default runner: fetch -> analyze -> verify -> report."""

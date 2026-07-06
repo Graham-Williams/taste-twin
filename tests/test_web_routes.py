@@ -48,7 +48,9 @@ def test_security_headers_present(dev_app):
     resp = dev_app.test_client().get("/")
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["X-Frame-Options"] == "DENY"
-    assert "Content-Security-Policy" in resp.headers
+    csp = resp.headers["Content-Security-Policy"]
+    assert "base-uri 'none'" in csp
+    assert "object-src 'none'" in csp
 
 
 # -- POST /run validation -----------------------------------------------------
@@ -108,6 +110,28 @@ def test_pin_accepts_same_origin_post(pinned_app):
         "/run", data={"username": "someuser"},
         headers={"Host": APP_HOST, "Origin": f"https://{APP_HOST}"})
     assert resp.status_code == 302
+
+
+def test_pin_rejects_post_with_neither_origin_nor_referer(pinned_app):
+    # No same-origin signal at all → can't prove same-origin → reject.
+    resp = pinned_app.test_client().post(
+        "/run", data={"username": "someuser"}, headers={"Host": APP_HOST})
+    assert resp.status_code == 403
+
+
+def test_pin_accepts_post_with_matching_referer_only(pinned_app):
+    # Some browsers omit Origin; a same-host Referer is an acceptable fallback.
+    resp = pinned_app.test_client().post(
+        "/run", data={"username": "someuser"},
+        headers={"Host": APP_HOST, "Referer": f"https://{APP_HOST}/"})
+    assert resp.status_code == 302
+
+
+def test_pin_rejects_post_with_mismatched_referer_only(pinned_app):
+    resp = pinned_app.test_client().post(
+        "/run", data={"username": "someuser"},
+        headers={"Host": APP_HOST, "Referer": "https://evil.example.com/"})
+    assert resp.status_code == 403
 
 
 def test_pin_healthz_exempt(pinned_app):
