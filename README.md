@@ -1,35 +1,48 @@
 # taste-twin
 
 Find Letterboxd users whose movie taste is most similar to yours, using only
-public profile data.
+public data.
 
 Given a Letterboxd username, taste-twin:
 
-1. **Scrapes** the user's public ratings (politely: 1 request/second,
-   identified User-Agent, on-disk cache).
-2. **Discovers** a pool of candidate users by looking at who else rated the
-   user's favorite films — weighted toward *obscure* favorites, which are the
-   strongest taste signal.
-3. **Collects** each candidate's ratings (bounded per candidate, resumable if
-   interrupted).
-4. **Scores** every candidate with a Pearson correlation over co-rated films,
-   after per-user z-score normalization (so a harsh 3-star-max rater can still
-   match a generous 5-star rater), with significance weighting so tiny overlaps
-   can't win.
-5. **Reports** the top matches as `report.md` and a standalone `report.html`:
-   score, overlap, films you both love, biggest disagreements.
+1. **Fetches** the user's current public ratings from their profile
+   (politely: 1 request/second, identified User-Agent, on-disk cache).
+2. **Ranks** them against a candidate pool of ~11,000 of Letterboxd's most
+   active members — the CC0 Kaggle dataset
+   [freeth/letterboxd-film-ratings](https://www.kaggle.com/datasets/freeth/letterboxd-film-ratings)
+   (~18M ratings, collected from public pages by
+   [adamjhf/letterboxd-scraper](https://github.com/adamjhf/letterboxd-scraper)),
+   loaded once into a local SQLite database. Scoring all 11k users takes
+   seconds.
+3. **Verifies live**: the dataset is a snapshot (Oct 2023), so the top
+   matches are re-scored against their *current* public ratings; dead and
+   private accounts are dropped.
+4. **Reports** the final matches as `report.md` and a standalone
+   `report.html`: score, Pearson r, overlap, data freshness, films you both
+   love, biggest disagreements.
+
+The similarity metric is a Pearson correlation over co-rated films after
+per-user z-score normalization (so a harsh 3-star-max rater can still match a
+generous 5-star rater), with significance weighting
+(`score = r * min(overlap, 50) / 50`) so tiny overlaps can't win.
 
 ## Requirements
 
 - Python 3.11+
-- `requests`, `beautifulsoup4` (see `requirements.txt`)
+- `requests`, `beautifulsoup4`, `kagglehub` (see `requirements.txt`);
+  dev/test tooling (`pytest`) lives in `requirements-dev.txt`
+- ~2.3 GB disk for the dataset + SQLite pool. The `kagglehub` download is
+  cached under `~/.cache/kagglehub/`; `data/` (gitignored) holds the built
+  `data/pool.db` and, only if you use the manual fallback, the CSVs in
+  `data/dataset/`
 
 ## Setup
 
 ```bash
 python3 -m venv .venv           # or: uv venv --python 3.12
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt      # runtime deps
+pip install -r requirements-dev.txt  # optional: adds pytest for the test suite
 ```
 
 ## Usage
@@ -40,33 +53,53 @@ End-to-end:
 python -m tastetwin run <letterboxd-username>
 ```
 
+The first run downloads the Kaggle dataset via `kagglehub` (no Kaggle
+account needed; the download is cached under `~/.cache/kagglehub/`) and
+builds `data/pool.db` (~1 minute). If the automatic download ever fails,
+download the zip from the dataset page and unzip `ratings.csv` +
+`films.csv` into `data/dataset/`.
+
 Useful options:
 
 ```bash
-python -m tastetwin run <user> --pool 1000 --min-overlap 15 --max-pages 10
+python -m tastetwin run <user> --verify-top 50 --min-overlap 15 --max-pages 10
 ```
 
-- `--pool N` — target number of candidate users to score (default 1000)
+- `--verify-top N` — how many top matches to re-verify live (default 50)
 - `--min-overlap N` — minimum co-rated films to consider a match (default 15)
-- `--max-pages N` — max ratings pages fetched per candidate (default 10,
+- `--max-pages N` — max ratings pages fetched per verified user (default 10,
   ≈720 films)
 
-Stages can also be run individually (each stage reuses cached/stored output
-from the previous one):
+Stages can also be run individually:
 
 ```bash
-python -m tastetwin fetch <user>      # scrape the target's ratings
-python -m tastetwin discover <user>   # build the candidate pool
-python -m tastetwin collect <user>    # fetch candidates' ratings (resumable)
-python -m tastetwin analyze <user>    # score + write report.md / report.html
+python -m tastetwin ingest            # download dataset, build data/pool.db
+python -m tastetwin fetch <user>      # scrape the target's current ratings
+python -m tastetwin analyze <user>    # rank all ~11k pool users (offline, fast)
+python -m tastetwin verify <user>     # re-score top matches live + report
 ```
 
 Output lands in `data/runs/<user>/` (`report.md`, `report.html`).
 
-**Heads up on runtime:** the scraper is deliberately single-threaded at
-~1 request/second. A full run with `--pool 1000` makes several thousand HTTP
-requests and takes **hours**. The CLI prints an ETA up front, and a killed run
-resumes where it left off (everything is cached under `data/cache/`).
+**Runtime:** analyze is seconds; live verification of the top 50 at
+1 request/second is roughly 10–30 minutes. Interrupting is safe — all pages
+are cached, so reruns resume where they left off.
+
+### Optional: scrape-based discovery
+
+The dataset pool skews toward very active accounts. To hunt for candidates
+outside it, an optional discovery mode finds users through the target's
+*obscure favorites* (high rating × low global popularity — the strongest
+taste signal), then collects their ratings:
+
+```bash
+python -m tastetwin discover <user> --pool 1000   # find candidate usernames
+python -m tastetwin collect <user>                # fetch their ratings (slow!)
+python -m tastetwin analyze <user>                # merges them into the ranking
+```
+
+Fair warning: collecting a 1000-user scraped pool at 1 request/second takes
+**hours**. The collector is resumable (progress is saved per candidate).
 
 ## Politeness policy
 
@@ -77,15 +110,25 @@ This project only reads public pages, and does so gently:
 - Retry with exponential backoff on 429/5xx, honoring `Retry-After`
 - On-disk cache with a freshness TTL — reruns don't re-fetch
 - robots.txt disallows are respected
+- The bulk candidate pool comes from an existing public CC0 dataset instead
+  of mass scraping
 
 ## Tests
 
 ```bash
+pip install -r requirements-dev.txt   # once, for pytest
 python -m pytest
 ```
 
 Parsing tests run against saved HTML fixtures (no network); similarity tests
-use hand-computed cases.
+use hand-computed cases; ingest tests use synthetic CSVs.
+
+## Credits
+
+- Candidate pool: [Letterboxd film ratings](https://www.kaggle.com/datasets/freeth/letterboxd-film-ratings)
+  by freeth on Kaggle (CC0), built with
+  [adamjhf/letterboxd-scraper](https://github.com/adamjhf/letterboxd-scraper).
+- Not affiliated with Letterboxd. Be kind to their servers.
 
 ## License
 
