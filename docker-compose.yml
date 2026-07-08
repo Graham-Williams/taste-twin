@@ -2,9 +2,10 @@
 #
 # - Joins the external `km-tracker_default` network so the tunnel can route
 #   taste-twin.graham-williams.com -> http://taste-twin:8080 by service name.
-# - NO host port mapping: the app is reachable only over that network, and
-#   every request must carry a Cloudflare Access JWT (verified in-app via
-#   CF_ACCESS_AUD + CF_ACCESS_TEAM_DOMAIN, from the box's untracked .env).
+# - NO host port mapping: the app is reachable only over that network; sign-in
+#   is gated by the app-level shared password (APP_PASSWORD, from the box's
+#   untracked .env). The in-app Cloudflare Access JWT check is retained but
+#   dormant when APP_PASSWORD is set.
 # - All state lives in the named volume `taste-twin-data`.
 services:
   taste-twin:
@@ -12,8 +13,14 @@ services:
     container_name: taste-twin
     restart: unless-stopped
     environment:
-      CF_ACCESS_AUD: ${CF_ACCESS_AUD:?set in .env on the box}
-      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:?set in .env on the box}
+      # Sign-in is the app-level shared-password gate (APP_PASSWORD); when it is
+      # set the in-app Cloudflare Access JWT check is bypassed. Leave the
+      # CF_ACCESS_* vars empty-safe so the app runs with either gate (or neither
+      # in local dev) — mirrors km-tracker / todoist-points.
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
       APP_HOST: taste-twin.graham-williams.com
       APP_ENV: prod
       # View-only gallery: Letterboxd's Cloudflare bot-management challenges
