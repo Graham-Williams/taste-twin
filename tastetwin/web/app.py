@@ -2,10 +2,17 @@
 
 Security posture (mirrors todoist-points; see repo CLAUDE.md):
 
+- App-level shared-password gate when APP_PASSWORD is set: every request that
+  isn't /login, /logout, a static asset or /healthz is redirected to /login
+  until the visitor presents the one shared password. Success stores a signed
+  session marker (SESSION_SECRET); the raw password is never stored or logged.
+  Unset APP_PASSWORD = gate OFF (unchanged behavior) — so it can ship dormant
+  behind Cloudflare Access and be switched on at cutover. See password_gate.py.
 - Cloudflare Access JWT verified in-app when CF_ACCESS_AUD +
-  CF_ACCESS_TEAM_DOMAIN are set (fail closed); unset = local dev mode.
+  CF_ACCESS_TEAM_DOMAIN are set (fail closed); unset = local dev mode. Kept
+  intact and env-gated — it just won't be configured after cutover.
 - APP_HOST, when set, pins the Host (all requests) and Origin (POSTs)
-  headers — CSRF/rebinding defense for the single state-changing route.
+  headers — CSRF/rebinding defense for state-changing routes incl. POST /login.
 - The only user input is a Letterboxd username: validated with
   scraper.is_valid_name before it is used anywhere, and passed through
   util.safe_filename before touching the filesystem. No other part of a
@@ -17,20 +24,23 @@ Security posture (mirrors todoist-points; see repo CLAUDE.md):
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from flask import (Flask, Response, abort, g, redirect, render_template,
-                   request, send_file, url_for)
+                   request, send_file, session, url_for)
 
 from ..report import METHODOLOGY
 from ..scraper import is_valid_name
 from ..util import safe_filename
 from .auth import AccessAuthError, AccessVerifier
 from .jobs import MAX_USERNAME_LEN, JobManager
+from .password_gate import LoginRateLimiter, client_ip, safe_next
 
 log = logging.getLogger("tastetwin.web")
 
@@ -90,6 +100,34 @@ def create_app(data_dir: str | Path | None = None, runner=None,
         log.info("TASTE_TWIN_VIEWER_MODE enabled — read-only gallery: no "
                  "username form, POST /run refused, no worker/ingest started.")
 
+    # -- app-level shared-password gate (env-gated by APP_PASSWORD) -----------
+    app_password = os.environ.get("APP_PASSWORD", "")
+    password_gate_enabled = bool(app_password)
+    # Sign the session cookie: prefer SESSION_SECRET, reuse SECRET_KEY if
+    # present, else fall back to an ephemeral key (a warning is logged when the
+    # gate is on, since sessions then won't survive a restart). Never hardcode.
+    session_secret = (os.environ.get("SESSION_SECRET", "")
+                      or os.environ.get("SECRET_KEY", ""))
+    app.secret_key = session_secret or secrets.token_hex(32)
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    )
+    login_limiter = LoginRateLimiter()
+    if password_gate_enabled:
+        if not session_secret:
+            log.warning("APP_PASSWORD set but SESSION_SECRET/SECRET_KEY unset "
+                        "— using an ephemeral signing key; sessions won't "
+                        "survive a restart. Set SESSION_SECRET.")
+        log.info("APP_PASSWORD set — shared-password gate ENABLED.")
+    else:
+        log.info("APP_PASSWORD unset — shared-password gate OFF "
+                 "(app behaves as before).")
+    # Paths reachable without a session even when the gate is on.
+    gate_exempt_paths = {"/login", "/logout", "/healthz"}
+
     manager = JobManager(data_dir, runner=runner)
     manager.recover()
     # In viewer mode nothing is ever enqueued, so we never start the worker
@@ -111,6 +149,23 @@ def create_app(data_dir: str | Path | None = None, runner=None,
             return "—"
 
     # -- middleware -----------------------------------------------------------
+
+    @app.before_request
+    def _password_gate():  # runs first; redirects unauth users to /login
+        if not password_gate_enabled:
+            return None
+        path = request.path
+        if path in gate_exempt_paths:
+            return None
+        if (request.endpoint == "static"
+                or path.startswith(app.static_url_path.rstrip("/") + "/")):
+            return None
+        if session.get("tt_authed") is True:
+            return None
+        nxt = path
+        if request.query_string:
+            nxt = f"{path}?{request.query_string.decode('latin-1')}"
+        return redirect(url_for("login", next=nxt))
 
     @app.before_request
     def _cloudflare_access():  # fail closed on every route but /healthz
@@ -169,6 +224,48 @@ def create_app(data_dir: str | Path | None = None, runner=None,
     @app.get("/healthz")
     def healthz():
         return {"status": "ok"}
+
+    @app.get("/login")
+    def login():
+        if not password_gate_enabled:
+            return redirect(url_for("index"))
+        if session.get("tt_authed") is True:
+            return redirect(safe_next(request.args.get("next")))
+        return render_template(
+            "login.html", next=request.args.get("next", ""), error=None)
+
+    @app.post("/login")
+    def login_post():
+        # Host/Origin CSRF pin already ran in before_request for this POST.
+        if not password_gate_enabled:
+            return redirect(url_for("index"))
+        next_target = request.form.get("next", "")
+        ip = client_ip()
+        if login_limiter.is_blocked(ip):
+            log.warning("login blocked (rate limit) for %s", ip)
+            return render_template(
+                "login.html", next=next_target,
+                error="Too many failed attempts. Try again in a few minutes."
+            ), 429
+        supplied = request.form.get("password", "")
+        if hmac.compare_digest(supplied, app_password):
+            session.clear()
+            session["tt_authed"] = True
+            session.permanent = True
+            login_limiter.reset(ip)
+            return redirect(safe_next(next_target))
+        login_limiter.record_failure(ip)
+        log.warning("failed login attempt from %s", ip)  # never log the password
+        return render_template(
+            "login.html", next=next_target,
+            error="Incorrect password."), 401
+
+    @app.get("/logout")
+    def logout():
+        session.clear()
+        if password_gate_enabled:
+            return redirect(url_for("login"))
+        return redirect(url_for("index"))
 
     @app.get("/")
     def index():

@@ -47,7 +47,9 @@ user-facing overview.
   - `__main__.py` — CLI (argparse; catches `PipelineError`).
   - `web/` — Flask app (see "Web app" below): `app.py` (factory
     `create_app`, routes, security middleware), `auth.py` (Cloudflare
-    Access JWT verification, JWKS cached with TTL), `jobs.py`
+    Access JWT verification, JWKS cached with TTL), `password_gate.py`
+    (app-level shared-password gate helpers: safe-`next`, per-IP login
+    rate limiter), `jobs.py`
     (`JobManager`: FIFO queue + single worker thread), `templates/`.
 - All bulky/local state under `data/` (gitignored): `cache/` (HTTP),
   `pool.db`, `dataset/` (manual-fallback CSVs only), `runs/<user>/`
@@ -116,12 +118,32 @@ generated report.html inline), `/about` (methodology), `/healthz`
   jobs; older terminal jobs are evicted from memory but remain on disk
   (`job.json`) and are re-read on demand by `get`/`list_runs`, so a
   long-lived process can't grow unbounded.
-- **Auth:** no built-in auth. When `CF_ACCESS_AUD` + `CF_ACCESS_TEAM_DOMAIN`
+- **Sign-in (app-level shared-password gate):** when `APP_PASSWORD` is set the
+  app runs its own password gate — a `before_request` (registered FIRST, so it
+  runs ahead of the CF-Access and Host pins) redirects any request that isn't
+  `/login`, `/logout`, a static asset, or `/healthz` to `/login?next=<path>`
+  until a session marker is present. `POST /login` compares the submitted
+  password to `APP_PASSWORD` with `hmac.compare_digest` (constant-time), and on
+  success stores only a signed session marker (`session['tt_authed']`, signed
+  with `SESSION_SECRET`/`SECRET_KEY` via itsdangerous — the raw password is
+  never stored in the cookie or logged). Cookie flags: HttpOnly + Secure +
+  SameSite=Lax, 30-day permanent lifetime. `next` is open-redirect-safe
+  (`password_gate.safe_next`: local single-slash paths only — rejects `//host`,
+  `https://`, `/\host`). Failed logins are rate-limited per client IP
+  (`CF-Connecting-IP`, fallback `remote_addr`) — 10 failures / 15 min → 429 for
+  ~15 min, in-memory (`password_gate.LoginRateLimiter`). The POST reuses the
+  existing `APP_HOST` Host/Origin CSRF pin. **Unset/empty `APP_PASSWORD` = gate
+  OFF (unchanged behavior)** — so it ships dormant behind CF Access and is
+  switched on at cutover. Sits cleanly in FRONT of viewer mode. `/logout`
+  clears the session. Tests: `tests/test_web_password_gate.py`.
+- **Auth (Cloudflare Access, kept intact + env-gated):** no built-in identity.
+  When `CF_ACCESS_AUD` + `CF_ACCESS_TEAM_DOMAIN`
   are set, every route except `/healthz` requires a valid Cloudflare
   Access JWT (`Cf-Access-Jwt-Assertion` header or `CF_Authorization`
   cookie): signature vs the team JWKS (cached 1 h, stale-on-refresh-failure,
   otherwise fail CLOSED), plus `aud`/`iss`/`exp` checks. Both vars unset =
-  dev mode with a loud log warning. `APP_HOST`, when set, pins the Host
+  dev mode with a loud log warning. After cutover to the shared-password gate
+  these are simply left unconfigured (the code stays). `APP_HOST`, when set, pins the Host
   header on all routes and enforces CSRF on POSTs: the request must carry a
   same-origin signal that matches `APP_HOST` — a matching `Origin` (checked
   alone when present) or, when `Origin` is absent, a same-host `Referer`. A
@@ -136,7 +158,10 @@ generated report.html inline), `/about` (methodology), `/healthz`
   nosniff, X-Frame-Options DENY, Referrer-Policy no-referrer.
 - Web tests: `tests/test_web_auth.py` (JWT/JWKS), `tests/test_web_routes.py`
   (validation, pinning, report serving), `tests/test_web_jobs.py` (queue
-  semantics with a mocked runner).
+  semantics with a mocked runner), `tests/test_web_password_gate.py`
+  (shared-password gate: env-gating, redirect-to-login, correct/wrong
+  password, rate limit, exempt routes, open-redirect safety, cookie flags,
+  viewer-mode behind the gate).
 
 ### Viewer mode / box-hosts-Mac-generates (keep this invariant)
 
