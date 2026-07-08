@@ -39,11 +39,46 @@ dev on a residential IP), leave the flag unset/`0`.
 
 - Repo checkout: `~/taste-twin` (deploy from `main` only)
 - Secrets: `~/taste-twin/.env` (untracked; copy from `.env.example` and fill
-  in the Access app's AUD tag + team domain)
+  in the Access app's AUD tag + team domain, plus the shared-password gate
+  vars once you cut over — see next section)
 - Data: named Docker volume `taste-twin_taste-twin-data`, mounted at
   `/app/data` in the container — HTTP cache, `pool.db`, `runs/<user>/`
   (job state + logs + reports), and the kagglehub download cache
   (`KAGGLEHUB_CACHE=/app/data/kagglehub`).
+
+## Sign-in: shared-password gate (replaces the emailed Access PIN)
+
+The app has a built-in sign-in gated by `APP_PASSWORD`. When set, every request
+(except `/login`, `/logout`, static assets, and `/healthz`) is redirected to
+`/login` until the visitor enters the one shared password; a correct password
+grants a signed, HttpOnly+Secure+SameSite=Lax session cookie (~30-day lifetime),
+so re-auth is rare. Wrong passwords are rate-limited per client IP (10 fails /
+15 min → temporary 429). **Unset/empty `APP_PASSWORD` = gate OFF** (the app
+falls back to whatever else is configured, e.g. CF Access) — so this ships
+dormant behind Access and is switched on at cutover.
+
+Box `.env` vars:
+
+```
+APP_PASSWORD=<the-one-shared-password-Graham-hands-out>
+SESSION_SECRET=<random-32+-byte-hex>   # signs the cookie; keep it stable
+```
+
+Generate `SESSION_SECRET` once with:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+**Cutover (operator, at go-time):** add `APP_PASSWORD` + `SESSION_SECRET` to the
+box `.env`, redeploy, verify `/login` works, THEN remove the Cloudflare Access
+app for `taste-twin.graham-williams.com` (and drop `CF_ACCESS_AUD` /
+`CF_ACCESS_TEAM_DOMAIN` from `.env`). The CF-Access verification code stays in
+the app, just unconfigured. Note viewer mode still applies: after signing in,
+the box gallery is read-only (form hidden, `POST /run` refused) exactly as
+before — the gate sits in front of it. **Keep `APP_HOST` set** at cutover
+(`docker-compose.yml` already sets it) — it is what enforces the Origin/Referer
+CSRF pin on `POST /login`.
 
 ## Deploy / update
 

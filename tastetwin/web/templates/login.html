@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}taste-twin — sign in{% endblock %}
+{% block content %}
+<h1>Sign in</h1>
+
+{% if error %}
+<div class="card error">{{ error }}</div>
+{% endif %}
+
+<div class="card">
+  <form method="post" action="{{ url_for('login_post') }}">
+    {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+    <label for="password">Password</label><br>
+    <input type="password" id="password" name="password" required autofocus
+           autocomplete="current-password">
+    <button type="submit">Enter</button>
+  </form>
+  <p class="muted">This site is protected by a shared password.</p>
+</div>
+{% endblock %}
