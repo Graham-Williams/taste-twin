@@ -162,13 +162,35 @@ generated report.html inline), `/about` (methodology), `/healthz`
   edge):** `_force_https` is the FIRST `before_request` — it runs ahead of the
   password gate, the CF-Access check and the Host pin, so a plain-http visitor
   is upgraded before any credential is read off the wire.
-  - **Redirect ONLY when `X-Forwarded-Proto` is present and EXACTLY `http`.**
-    cloudflared forwards the visitor's scheme in that header; an ABSENT header
-    means the request never came through the tunnel — the compose healthcheck
-    (`urlopen('http://127.0.0.1:8080/healthz')`), local dev, the CLI, and the
-    test suite. Those must not be redirected. **The header rule IS the
-    exemption** — no route carries a per-path exception, and none should.
-    Anything else (`https`, `HTTP`, `http, https`, empty) fails open.
+  - **Redirect ONLY when `X-Forwarded-Proto`, trimmed and case-folded, is
+    exactly `http`.** cloudflared forwards the visitor's scheme in that header;
+    an ABSENT header means the request never came through the tunnel — the
+    compose healthcheck (`urlopen('http://127.0.0.1:8080/healthz')`), local
+    dev, the CLI, and the test suite. Those must not be redirected. **The
+    header rule IS the exemption** — no route carries a per-path exception, and
+    none should. Anything else (`https`, `http, https`, `httpx`, empty) fails
+    open.
+    - ⚠️ **The comparison must be `.strip().lower()`** — URI schemes are
+      case-INSENSITIVE (RFC 3986 §3.1, RFC 9110). The original
+      `!= "http"` was case-sensitive and failed in the *dangerous* direction:
+      measured live against gunicorn, `X-Forwarded-Proto: HTTP` was served
+      **200 over plain http**. All five sibling repos now normalise the same
+      way. **`http, https` (a multi-hop value) must still NOT match** — we
+      refuse to guess which hop the visitor was on; there is a test for it.
+  - **The redirect is a `307`, with `Cache-Control: no-store` and
+    `Vary: X-Forwarded-Proto`.** The emitted `Location` is byte-identical to
+    the requested URL, and a `301` carrying no freshness information is
+    heuristically cacheable *indefinitely* (RFC 9111 §4.2.2). In the exact
+    scenario this feature exists for — the edge's *Always Use HTTPS*
+    regressing — a shared cache could store that self-referential redirect
+    (and `/static/*.css|.js` are precisely what Cloudflare caches by default)
+    and then replay it to **https** visitors: broken assets, or a loop. A
+    misconfigured `APP_HOST` under a `301` would likewise be sticky in every
+    visitor's browser with no way to recall it. `307` also preserves the
+    method, so a plain-http POST is re-sent over https instead of being
+    silently downgraded to a bodiless GET. HSTS already supplies the durable
+    client-side upgrade, so permanence buys nothing. **Do not "restore" the
+    301.**
   - **The `Location` is built from the configured `APP_HOST`, NEVER from the
     request's own Host/URL** — host reflection would make this an open
     redirect. `APP_HOST` is re-validated as a bare hostname (`_HOSTNAME_RE`,

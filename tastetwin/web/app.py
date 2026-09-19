@@ -14,8 +14,9 @@ Security posture (mirrors todoist-points; see repo CLAUDE.md):
 - APP_HOST, when set, pins the Host (all requests) and Origin (POSTs)
   headers — CSRF/rebinding defense for state-changing routes incl. POST /login.
 - HTTPS is enforced at the origin as well as at the Cloudflare edge: a request
-  whose X-Forwarded-Proto is exactly "http" is 301'd to https://<APP_HOST>, and
-  every response carries Strict-Transport-Security. See _force_https below.
+  whose X-Forwarded-Proto (trimmed, case-folded) is exactly "http" is 307'd to
+  https://<APP_HOST> with Cache-Control: no-store + Vary: X-Forwarded-Proto,
+  and every response carries Strict-Transport-Security. See _force_https.
 - The only user input is a Letterboxd username: validated with
   scraper.is_valid_name before it is used anywhere, and passed through
   util.safe_filename before touching the filesystem. No other part of a
@@ -220,24 +221,47 @@ def create_app(data_dir: str | Path | None = None, runner=None,
 
         Only the Cloudflare tunnel reaches this container, and cloudflared
         forwards the visitor's scheme as X-Forwarded-Proto. Redirect ONLY when
-        that header is present and exactly "http":
+        that header, trimmed and case-folded, is exactly "http":
 
         - An ABSENT header means the request did not arrive through the tunnel
           — the compose healthcheck (``urlopen('http://127.0.0.1:8080/
           healthz')``), local dev, and the test suite. Those must NOT be
           redirected. The header rule IS the exemption, so no route needs one.
+        - URI schemes are case-INSENSITIVE (RFC 3986 §3.1, RFC 9110), so the
+          comparison is ``.strip().lower()``. A case-sensitive ``!= "http"``
+          fails in the dangerous direction: ``X-Forwarded-Proto: HTTP`` would
+          be served 200 over plain http. A multi-hop value ("http, https")
+          still does NOT match — we only act on an unambiguous single scheme.
         - The target is always built from the configured APP_HOST, NEVER from
           the request's own Host/URL: reflecting an attacker-supplied Host
           would turn this into an open redirect.
         - With APP_HOST unset (or malformed) there is no safe target to name,
           so we fail OPEN — no redirect — rather than guess. That keeps local
           dev, the CLI path and the tests working.
+
+        307, not 301: the emitted Location is byte-identical to the requested
+        URL, and a 301 with no freshness information is heuristically cacheable
+        *indefinitely* (RFC 9111 §4.2.2). If the edge's "Always Use HTTPS" ever
+        regressed, a shared cache could store this self-referential redirect —
+        under ``/static/*.css|.js``, exactly what Cloudflare caches by default
+        — and then serve it to https visitors: broken assets, or a loop. A
+        misconfigured APP_HOST under a 301 would likewise be sticky in every
+        visitor's browser with no way to recall it. 307 also preserves the
+        method, so a plain-http POST is re-sent over https rather than being
+        silently downgraded to a bodiless GET. HSTS already provides the
+        durable client-side upgrade, so permanence buys nothing here.
+        ``Cache-Control: no-store`` + ``Vary: X-Forwarded-Proto`` say out loud
+        what the response actually depends on.
         """
         if not https_host:
             return None
-        if request.headers.get("X-Forwarded-Proto") != "http":
+        proto = (request.headers.get("X-Forwarded-Proto") or "").strip().lower()
+        if proto != "http":
             return None
-        return redirect(f"https://{https_host}{_request_target()}", code=301)
+        resp = redirect(f"https://{https_host}{_request_target()}", code=307)
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Vary"] = "X-Forwarded-Proto"
+        return resp
 
     @app.before_request
     def _password_gate():  # redirects unauth users to /login

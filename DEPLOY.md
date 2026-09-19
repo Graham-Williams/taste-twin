@@ -131,23 +131,41 @@ docker exec taste-twin cat /app/data/runs/<u>/job.log   # one run's pipeline log
 
 ### HTTPS enforcement (origin-side, defence in depth)
 
-The app 301s plain http to `https://$APP_HOST` when cloudflared forwards
-`X-Forwarded-Proto: http`, and sends `Strict-Transport-Security:
-max-age=31536000` on every response. An **absent** header never redirects,
-which is why the compose healthcheck (in-network, no such header) is
-unaffected — verify both:
+The app **307s** plain http to `https://$APP_HOST` when cloudflared forwards
+`X-Forwarded-Proto: http` (matched case-insensitively after trimming, so
+`HTTP` redirects too; a multi-hop `http, https` does not), and sends
+`Strict-Transport-Security: max-age=31536000` on every response. The redirect
+carries `Cache-Control: no-store` + `Vary: X-Forwarded-Proto` — it is
+deliberately **not** a 301, because its `Location` is byte-identical to the
+request URL and a cacheable 301 could be stored by a shared cache and replayed
+to https visitors. An **absent** header never redirects, which is why the
+compose healthcheck (in-network, no such header) is unaffected — verify both:
 
 ```bash
 # in-network, no X-Forwarded-Proto -> 200, never a redirect
 docker exec taste-twin python3 -c \
   "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).status)"
 
-# plain-http visitor -> 301 to the PINNED host, query preserved
+# plain-http visitor -> 307 to the PINNED host, query preserved
+# (expect: 307 https://<APP_HOST>/?a=1)
 docker exec taste-twin python3 -c "
 import urllib.request as u, urllib.error as e
 class N(u.HTTPRedirectHandler):
     def redirect_request(self, *a, **k): return None
 req = u.Request('http://127.0.0.1:8080/?a=1', headers={'X-Forwarded-Proto': 'http'})
+try:
+    u.build_opener(N).open(req)
+except e.HTTPError as x:
+    print(x.code, x.headers.get('Location'),
+          x.headers.get('Cache-Control'), x.headers.get('Vary'))
+"
+
+# uppercase scheme must ALSO redirect (schemes are case-insensitive)
+docker exec taste-twin python3 -c "
+import urllib.request as u, urllib.error as e
+class N(u.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k): return None
+req = u.Request('http://127.0.0.1:8080/', headers={'X-Forwarded-Proto': 'HTTP'})
 try:
     u.build_opener(N).open(req)
 except e.HTTPError as x:

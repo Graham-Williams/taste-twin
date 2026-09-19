@@ -3,10 +3,18 @@
 Defence in depth behind the Cloudflare edge (repo issue #9). The load-bearing
 rules being pinned here:
 
-- Redirect ONLY when X-Forwarded-Proto is present and exactly "http". An
-  ABSENT header must never redirect — the compose healthcheck calls
+- Redirect ONLY when X-Forwarded-Proto, trimmed and case-folded, is exactly
+  "http". Schemes are case-insensitive (RFC 3986/9110), so "HTTP" must redirect
+  too — a case-SENSITIVE check fails in the dangerous direction (plain http
+  served 200). A multi-hop "http, https" must still NOT redirect. An ABSENT
+  header must never redirect — the compose healthcheck calls
   http://127.0.0.1:8080/healthz in-network with no such header, and so do
   local dev and this test suite.
+- The redirect is a 307 (not a 301) and carries Cache-Control: no-store +
+  Vary: X-Forwarded-Proto. The Location is byte-identical to the request URL,
+  so a cacheable 301 could be stored by a shared cache and replayed to https
+  visitors (broken /static assets, or a loop); 307 also keeps the method so a
+  plain-http POST is re-sent rather than downgraded to a bodiless GET.
 - The Location is always built from the configured APP_HOST, never from the
   request's own Host header (that would be an open redirect).
 - APP_HOST unset => no redirect at all (fail open).
@@ -50,13 +58,13 @@ def _get(app, path, proto=None, host=APP_HOST, **kwargs):
 
 def test_xfp_http_redirects_to_https(pinned_app):
     resp = _get(pinned_app, "/", proto="http")
-    assert resp.status_code == 301
+    assert resp.status_code == 307
     assert resp.headers["Location"] == f"https://{APP_HOST}/"
 
 
 def test_redirect_preserves_path_and_query(pinned_app):
     resp = _get(pinned_app, "/run/someone?a=1&b=two", proto="http")
-    assert resp.status_code == 301
+    assert resp.status_code == 307
     assert resp.headers["Location"] == (
         f"https://{APP_HOST}/run/someone?a=1&b=two")
 
@@ -65,7 +73,7 @@ def test_redirect_preserves_percent_encoding(pinned_app):
     """request.path is URL-DECODED, so a naive f-string would mangle these."""
     resp = _get(pinned_app, "/report/a%20b%3Fc%2Fd?q=1%202&z=%3F%26",
                 proto="http")
-    assert resp.status_code == 301
+    assert resp.status_code == 307
     assert resp.headers["Location"] == (
         f"https://{APP_HOST}/report/a%20b%3Fc%2Fd?q=1%202&z=%3F%26")
     # Specifically: no decoded space, no decoded '?' or '/' inside the path.
@@ -82,7 +90,7 @@ def test_redirect_runs_before_the_password_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "unit-test-session-secret")
     app = create_app(data_dir=tmp_path / "data", start_worker=False)
     resp = _get(app, "/", proto="http")
-    assert resp.status_code == 301
+    assert resp.status_code == 307
     assert resp.headers["Location"] == f"https://{APP_HOST}/"
 
 
@@ -92,7 +100,7 @@ def test_redirect_applies_in_viewer_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_HOST", APP_HOST)
     monkeypatch.setenv("TASTE_TWIN_VIEWER_MODE", "1")
     app = create_app(data_dir=tmp_path / "data", start_worker=False)
-    assert _get(app, "/", proto="http").status_code == 301
+    assert _get(app, "/", proto="http").status_code == 307
     # ...and viewer mode itself is otherwise untouched.
     assert _get(app, "/", proto="https").status_code == 200
 
@@ -106,7 +114,7 @@ def test_redirect_applies_in_viewer_mode(tmp_path, monkeypatch):
 ])
 def test_crafted_host_is_not_reflected(pinned_app, evil_host):
     resp = _get(pinned_app, "/", proto="http", host=evil_host)
-    assert resp.status_code == 301
+    assert resp.status_code == 307
     assert resp.headers["Location"] == f"https://{APP_HOST}/"
     assert evil_host.split(":")[0] not in resp.headers["Location"]
 
@@ -116,7 +124,7 @@ def test_crafted_host_header_is_not_reflected(pinned_app):
     resp = pinned_app.test_client().get(
         "/", headers={"X-Forwarded-Proto": "http", "Host": "evil.example.net"},
         base_url=f"https://{APP_HOST}")
-    assert resp.status_code == 301
+    assert resp.status_code == 307
     assert resp.headers["Location"] == f"https://{APP_HOST}/"
 
 
@@ -140,12 +148,56 @@ def test_absent_xfp_on_a_normal_route_is_not_redirected(pinned_app):
     assert _get(pinned_app, "/").status_code == 200
 
 
-@pytest.mark.parametrize("proto", ["https", "HTTP", "http, https", "", " http",
-                                   "httpx"])
-def test_only_an_exact_http_value_redirects(pinned_app, proto):
-    """Anything but exactly "http" fails open rather than redirecting."""
+@pytest.mark.parametrize("proto", ["https", "HTTPS", "http, https",
+                                   "https, http", "", " ", "httpx", "xhttp",
+                                   "ws"])
+def test_values_that_must_not_redirect(pinned_app, proto):
+    """Anything that isn't an unambiguous single "http" fails open.
+
+    "http, https" in particular is a MULTI-HOP value (two proxies appended
+    their own scheme); we refuse to guess which hop the visitor was on.
+    """
     resp = _get(pinned_app, "/healthz", proto=proto)
     assert resp.status_code == 200
+    assert "Location" not in resp.headers
+
+
+@pytest.mark.parametrize("proto", ["http", "HTTP", "Http", "hTTp", " http",
+                                   "http ", "  HTTP\t"])
+def test_http_is_matched_case_insensitively_and_trimmed(pinned_app, proto):
+    """URI schemes are case-insensitive (RFC 3986 §3.1, RFC 9110).
+
+    A case-SENSITIVE `!= "http"` failed in the dangerous direction: measured
+    live against gunicorn, `X-Forwarded-Proto: HTTP` was served 200 over plain
+    http with no upgrade at all.
+    """
+    resp = _get(pinned_app, "/", proto=proto)
+    assert resp.status_code == 307
+    assert resp.headers["Location"] == f"https://{APP_HOST}/"
+
+
+# -- the redirect must not be cached ------------------------------------------
+
+def test_redirect_is_not_cacheable_and_declares_its_vary(pinned_app):
+    """Location is byte-identical to the request URL, so a cacheable redirect
+    is a trap: a shared cache (Cloudflare caches .css/.js by default) could
+    store it and replay it to https visitors — broken assets, or a loop. The
+    response depends on X-Forwarded-Proto, so it has to say so."""
+    resp = _get(pinned_app, "/static/does-not-matter.css", proto="http")
+    assert resp.status_code == 307
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert resp.headers["Vary"] == "X-Forwarded-Proto"
+
+
+def test_redirect_is_307_not_301(pinned_app):
+    """307 preserves the method: a plain-http POST is re-sent over https
+    instead of being silently downgraded to a bodiless GET. HSTS already
+    supplies the durable client-side upgrade, so permanence buys nothing."""
+    resp = pinned_app.test_client().post(
+        "/run", headers={"X-Forwarded-Proto": "http"},
+        data={"username": "someone"}, base_url=f"https://{APP_HOST}")
+    assert resp.status_code == 307
+    assert resp.headers["Location"] == f"https://{APP_HOST}/run"
 
 
 def test_no_redirect_when_app_host_unset(unpinned_app):
@@ -194,7 +246,7 @@ def test_hsts_on_every_route(pinned_app, path):
 
 def test_hsts_on_the_redirect_itself(pinned_app):
     resp = _get(pinned_app, "/", proto="http")
-    assert resp.status_code == 301
+    assert resp.status_code == 307
     assert resp.headers["Strict-Transport-Security"] == HSTS
 
 
