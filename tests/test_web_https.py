@@ -206,6 +206,14 @@ def test_no_redirect_when_app_host_unset(unpinned_app):
     assert resp.status_code == 200
 
 
+# The DNS maximum is 253 characters. Both sides of that boundary are pinned:
+# a 253-char host must still work, 254 must not. Built from valid 63-char
+# labels so ONLY the total length can be what rejects the long one.
+_MAX_LEN_HOST = ("a" * 63 + ".") * 3 + "b" * 61      # exactly 253
+_OVERLONG_HOST = ("a" * 63 + ".") * 3 + "b" * 62     # exactly 254
+assert (len(_MAX_LEN_HOST), len(_OVERLONG_HOST)) == (253, 254)
+
+
 @pytest.mark.parametrize("bad_host", [
     "https://taste-twin.example.com",
     "taste-twin.example.com/evil",
@@ -213,6 +221,7 @@ def test_no_redirect_when_app_host_unset(unpinned_app):
     "evil.net\r\nX-Injected: 1",
     "taste-twin-.example.com",   # trailing-hyphen label
     "taste-twin..example.com",   # empty label
+    _OVERLONG_HOST,             # 254 chars: one over the DNS maximum
 ])
 def test_malformed_app_host_disables_the_redirect(tmp_path, monkeypatch,
                                                   bad_host):
@@ -227,6 +236,17 @@ def test_malformed_app_host_disables_the_redirect(tmp_path, monkeypatch,
         base_url="https://anything.example")
     assert resp.status_code == 200
     assert "Location" not in resp.headers
+
+
+def test_app_host_length_boundary_is_exactly_the_dns_maximum():
+    r"""253 is the DNS maximum, so 253 must pass and 254 must not.
+
+    The per-label pattern bounds each LABEL but not the total, so this pins
+    the `(?=.{1,253}\Z)` lookahead specifically.
+    """
+    from tastetwin.web.app import _HOSTNAME_RE
+    assert _HOSTNAME_RE.fullmatch(_MAX_LEN_HOST)
+    assert not _HOSTNAME_RE.fullmatch(_OVERLONG_HOST)
 
 
 # -- HSTS ---------------------------------------------------------------------
