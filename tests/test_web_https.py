@@ -211,6 +211,8 @@ def test_no_redirect_when_app_host_unset(unpinned_app):
     "taste-twin.example.com/evil",
     "taste-twin.example.com:8080",
     "evil.net\r\nX-Injected: 1",
+    "taste-twin-.example.com",   # trailing-hyphen label
+    "taste-twin..example.com",   # empty label
 ])
 def test_malformed_app_host_disables_the_redirect(tmp_path, monkeypatch,
                                                   bad_host):

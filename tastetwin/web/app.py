@@ -63,8 +63,12 @@ _HSTS = "max-age=31536000"
 # no path, no credentials) before it can be used there.
 # NOTE \A/\Z, not ^/$: "$" also matches before a TRAILING NEWLINE, so
 # "evil.net\n" would pass a "^...$" check and reach a response header.
+# Per-LABEL pattern (each dot-separated label 1-63 chars, no leading or
+# trailing hyphen) — byte-identical to the one in jjho-fan-almanac, so all
+# five sibling apps agree on exactly what a hostname is.
 _HOSTNAME_RE = re.compile(
-    r"\A[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?\Z")
+    r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\Z")
 
 # A raw request target we are willing to echo back verbatim into a Location
 # header: origin-form (starts with "/") and printable ASCII only. Anything else
