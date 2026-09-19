@@ -119,8 +119,9 @@ generated report.html inline), `/about` (methodology), `/healthz`
   (`job.json`) and are re-read on demand by `get`/`list_runs`, so a
   long-lived process can't grow unbounded.
 - **Sign-in (app-level shared-password gate):** when `APP_PASSWORD` is set the
-  app runs its own password gate — a `before_request` (registered FIRST, so it
-  runs ahead of the CF-Access and Host pins) redirects any request that isn't
+  app runs its own password gate — a `before_request` (registered ahead of the
+  CF-Access and Host pins, and just after the `_force_https` upgrade) redirects
+  any request that isn't
   `/login`, `/logout`, a static asset, or `/healthz` to `/login?next=<path>`
   until a session marker is present. `POST /login` compares the submitted
   password to `APP_PASSWORD` with `hmac.compare_digest` (constant-time), and on
@@ -155,13 +156,46 @@ generated report.html inline), `/about` (methodology), `/healthz`
   a resolved-path containment check. Jinja autoescape stays on; nothing
   remote-derived is ever `|safe`. Security headers set on every response:
   CSP (`default-src 'self'`, incl. `base-uri 'none'` + `object-src 'none'`),
-  nosniff, X-Frame-Options DENY, Referrer-Policy no-referrer.
+  nosniff, X-Frame-Options DENY, `Referrer-Policy: same-origin`, and
+  `Strict-Transport-Security: max-age=31536000`.
+- **HTTPS enforced at the origin (defence in depth, not just at the Cloudflare
+  edge):** `_force_https` is the FIRST `before_request` — it runs ahead of the
+  password gate, the CF-Access check and the Host pin, so a plain-http visitor
+  is upgraded before any credential is read off the wire.
+  - **Redirect ONLY when `X-Forwarded-Proto` is present and EXACTLY `http`.**
+    cloudflared forwards the visitor's scheme in that header; an ABSENT header
+    means the request never came through the tunnel — the compose healthcheck
+    (`urlopen('http://127.0.0.1:8080/healthz')`), local dev, the CLI, and the
+    test suite. Those must not be redirected. **The header rule IS the
+    exemption** — no route carries a per-path exception, and none should.
+    Anything else (`https`, `HTTP`, `http, https`, empty) fails open.
+  - **The `Location` is built from the configured `APP_HOST`, NEVER from the
+    request's own Host/URL** — host reflection would make this an open
+    redirect. `APP_HOST` is re-validated as a bare hostname (`_HOSTNAME_RE`,
+    anchored with `\A`/`\Z` — `$` also matches before a trailing newline)
+    before it can reach a response header; a malformed value disables the
+    redirect rather than emitting it.
+  - **`APP_HOST` unset/malformed => no redirect at all (fail OPEN).** HSTS is
+    still sent. This is what keeps local dev and the tests working.
+  - **Path + query are preserved byte-for-byte, percent-encoding included.**
+    `request.path` is already URL-DECODED, so building the target from it would
+    turn `/a%20b` into `/a b` and `/a%2Fb` into `/a/b` — a different resource.
+    `_request_target()` prefers the raw `RAW_URI`/`REQUEST_URI` from the WSGI
+    environ (gunicorn, the Werkzeug dev server and the Flask test client all
+    set it) and only re-encodes as a fallback.
+  - HSTS is deliberately `max-age=31536000` with **no `includeSubDomains` and
+    no `preload`** — each host owns its own policy (matches the apex landing
+    page's `snippets/security-headers.conf`, the reference implementation).
+  - Session/login cookies are already `Secure` + `HttpOnly` + `SameSite=Lax`;
+    that is now asserted at the config level too.
 - Web tests: `tests/test_web_auth.py` (JWT/JWKS), `tests/test_web_routes.py`
   (validation, pinning, report serving), `tests/test_web_jobs.py` (queue
   semantics with a mocked runner), `tests/test_web_password_gate.py`
   (shared-password gate: env-gating, redirect-to-login, correct/wrong
   password, rate limit, exempt routes, open-redirect safety, cookie flags,
-  viewer-mode behind the gate).
+  viewer-mode behind the gate), `tests/test_web_https.py` (http->https
+  redirect incl. encoding round-trip + no host reflection, the no-redirect
+  cases, HSTS, cookie flags).
 
 ### Viewer mode / box-hosts-Mac-generates (keep this invariant)
 

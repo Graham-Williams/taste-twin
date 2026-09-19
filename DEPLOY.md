@@ -129,6 +129,39 @@ docker exec taste-twin ls /app/data/runs           # per-user run dirs
 docker exec taste-twin cat /app/data/runs/<u>/job.log   # one run's pipeline log
 ```
 
+### HTTPS enforcement (origin-side, defence in depth)
+
+The app 301s plain http to `https://$APP_HOST` when cloudflared forwards
+`X-Forwarded-Proto: http`, and sends `Strict-Transport-Security:
+max-age=31536000` on every response. An **absent** header never redirects,
+which is why the compose healthcheck (in-network, no such header) is
+unaffected — verify both:
+
+```bash
+# in-network, no X-Forwarded-Proto -> 200, never a redirect
+docker exec taste-twin python3 -c \
+  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).status)"
+
+# plain-http visitor -> 301 to the PINNED host, query preserved
+docker exec taste-twin python3 -c "
+import urllib.request as u, urllib.error as e
+class N(u.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k): return None
+req = u.Request('http://127.0.0.1:8080/?a=1', headers={'X-Forwarded-Proto': 'http'})
+try:
+    u.build_opener(N).open(req)
+except e.HTTPError as x:
+    print(x.code, x.headers.get('Location'))
+"
+
+# from the Mac, over the edge
+curl -sI https://taste-twin.graham-williams.com/login | grep -i strict-transport-security
+```
+
+If `APP_HOST` is unset or not a bare hostname the redirect is **disabled**
+(fail open) and the container logs a warning at boot — check the logs if a
+plain-http request isn't being upgraded.
+
 ## Cloudflare side (managed by Hopper via API, not this repo)
 
 One-time, before first deploy:
