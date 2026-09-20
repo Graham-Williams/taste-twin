@@ -6,6 +6,9 @@ data/
 .env.*
 !.env.example
 
+# Agent scratch context (per-feature notes; never committed)
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]

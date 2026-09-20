@@ -13,6 +13,10 @@ Security posture (mirrors todoist-points; see repo CLAUDE.md):
   intact and env-gated — it just won't be configured after cutover.
 - APP_HOST, when set, pins the Host (all requests) and Origin (POSTs)
   headers — CSRF/rebinding defense for state-changing routes incl. POST /login.
+- HTTPS is enforced at the origin as well as at the Cloudflare edge: a request
+  whose X-Forwarded-Proto (trimmed, case-folded) is exactly "http" is 307'd to
+  https://<APP_HOST> with Cache-Control: no-store + Vary: X-Forwarded-Proto,
+  and every response carries Strict-Transport-Security. See _force_https.
 - The only user input is a Letterboxd username: validated with
   scraper.is_valid_name before it is used anywhere, and passed through
   util.safe_filename before touching the filesystem. No other part of a
@@ -27,10 +31,11 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import re
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from flask import (Flask, Response, abort, g, redirect, render_template,
                    request, send_file, session, url_for)
@@ -48,6 +53,29 @@ _CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; "
         "base-uri 'none'; object-src 'none'")
 
+# HSTS: one year, deliberately WITHOUT includeSubDomains and WITHOUT preload —
+# each host owns its own policy (matches the apex landing page's
+# snippets/security-headers.conf, the reference implementation).
+_HSTS = "max-age=31536000"
+
+# APP_HOST is operator-configured, but the http->https redirect splices it into
+# a Location header, so it is validated as a bare hostname (no scheme, no port,
+# no path, no credentials) before it can be used there.
+# NOTE \A/\Z, not ^/$: "$" also matches before a TRAILING NEWLINE, so
+# "evil.net\n" would pass a "^...$" check and reach a response header.
+# Per-LABEL pattern (each dot-separated label 1-63 chars, no leading or
+# trailing hyphen) — byte-identical to the one in jjho-fan-almanac, so all
+# five sibling apps agree on exactly what a hostname is.
+_HOSTNAME_RE = re.compile(
+    r"\A(?=.{1,253}\Z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\Z")
+
+# A raw request target we are willing to echo back verbatim into a Location
+# header: origin-form (starts with "/") and printable ASCII only. Anything else
+# (CR/LF, NUL, spaces, raw UTF-8, absolute-form URIs, "*") is re-encoded from
+# the parsed request instead of being trusted.
+_SAFE_TARGET_RE = re.compile(r"\A/[\x21-\x7e]*\Z")  # \Z: see above
+
 # View-only message shown when a POST /run is refused in viewer mode.
 VIEWER_ONLY_MESSAGE = (
     "This site is view-only — new taste-twin reports are generated on request. "
@@ -56,6 +84,32 @@ VIEWER_ONLY_MESSAGE = (
 
 def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _request_target() -> str:
+    """Path + query to append to the https redirect, preserving encoding.
+
+    This must round-trip percent-encoding byte-for-byte, and Flask's
+    ``request.path`` is already URL-DECODED: building the target from it turns
+    ``/a%20b`` into ``/a b`` and ``/a%2Fb`` into ``/a/b`` — a *different*
+    resource. The WSGI layer keeps the original request-target bytes in
+    ``RAW_URI`` / ``REQUEST_URI`` (gunicorn, the Werkzeug dev server and the
+    Flask test client all set them), so prefer those verbatim.
+
+    The fallback (no raw target in the environ) re-encodes the decoded path and
+    re-attaches the raw query string; it is lossy for ``%2F`` but never unsafe,
+    and anything that still doesn't look like a clean origin-form target
+    degrades to ``/`` rather than reaching a response header.
+    """
+    for key in ("RAW_URI", "REQUEST_URI"):
+        raw = request.environ.get(key)
+        if isinstance(raw, str) and _SAFE_TARGET_RE.match(raw):
+            return raw
+    target = quote(request.path, safe="/-._~!$&'()*+,;=:@")
+    qs = request.query_string.decode("latin-1")
+    if qs:
+        target = f"{target}?{qs}"
+    return target if _SAFE_TARGET_RE.match(target) else "/"
 
 
 def create_app(data_dir: str | Path | None = None, runner=None,
@@ -150,8 +204,71 @@ def create_app(data_dir: str | Path | None = None, runner=None,
 
     # -- middleware -----------------------------------------------------------
 
+    # APP_HOST doubles as the redirect target for the http->https upgrade, so
+    # it has to be a bare hostname before it can be spliced into a Location.
+    https_host = app_host if _HOSTNAME_RE.match(app_host or "") else ""
+    if app_host and not https_host:
+        log.warning("APP_HOST=%r is not a bare hostname — the http->https "
+                    "redirect is DISABLED (Host pinning is unaffected).",
+                    app_host)
+    elif not https_host:
+        log.warning("APP_HOST not set — http->https redirect disabled "
+                    "(local dev / CLI). HSTS is still sent.")
+
     @app.before_request
-    def _password_gate():  # runs first; redirects unauth users to /login
+    def _force_https():
+        """Upgrade plain-http visitors to https (defence in depth).
+
+        Registered FIRST so it runs ahead of the password gate, the CF-Access
+        check and the Host pin: a plain-http visitor is redirected before any
+        credential is read off the wire.
+
+        Only the Cloudflare tunnel reaches this container, and cloudflared
+        forwards the visitor's scheme as X-Forwarded-Proto. Redirect ONLY when
+        that header, trimmed and case-folded, is exactly "http":
+
+        - An ABSENT header means the request did not arrive through the tunnel
+          — the compose healthcheck (``urlopen('http://127.0.0.1:8080/
+          healthz')``), local dev, and the test suite. Those must NOT be
+          redirected. The header rule IS the exemption, so no route needs one.
+        - URI schemes are case-INSENSITIVE (RFC 3986 §3.1, RFC 9110), so the
+          comparison is ``.strip().lower()``. A case-sensitive ``!= "http"``
+          fails in the dangerous direction: ``X-Forwarded-Proto: HTTP`` would
+          be served 200 over plain http. A multi-hop value ("http, https")
+          still does NOT match — we only act on an unambiguous single scheme.
+        - The target is always built from the configured APP_HOST, NEVER from
+          the request's own Host/URL: reflecting an attacker-supplied Host
+          would turn this into an open redirect.
+        - With APP_HOST unset (or malformed) there is no safe target to name,
+          so we fail OPEN — no redirect — rather than guess. That keeps local
+          dev, the CLI path and the tests working.
+
+        307, not 301: the emitted Location is byte-identical to the requested
+        URL, and a 301 with no freshness information is heuristically cacheable
+        *indefinitely* (RFC 9111 §4.2.2). If the edge's "Always Use HTTPS" ever
+        regressed, a shared cache could store this self-referential redirect —
+        under ``/static/*.css|.js``, exactly what Cloudflare caches by default
+        — and then serve it to https visitors: broken assets, or a loop. A
+        misconfigured APP_HOST under a 301 would likewise be sticky in every
+        visitor's browser with no way to recall it. 307 also preserves the
+        method, so a plain-http POST is re-sent over https rather than being
+        silently downgraded to a bodiless GET. HSTS already provides the
+        durable client-side upgrade, so permanence buys nothing here.
+        ``Cache-Control: no-store`` + ``Vary: X-Forwarded-Proto`` say out loud
+        what the response actually depends on.
+        """
+        if not https_host:
+            return None
+        proto = (request.headers.get("X-Forwarded-Proto") or "").strip().lower()
+        if proto != "http":
+            return None
+        resp = redirect(f"https://{https_host}{_request_target()}", code=307)
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Vary"] = "X-Forwarded-Proto"
+        return resp
+
+    @app.before_request
+    def _password_gate():  # redirects unauth users to /login
         if not password_gate_enabled:
             return None
         path = request.path
@@ -217,6 +334,9 @@ def create_app(data_dir: str | Path | None = None, runner=None,
         # outbound letterboxd.com URLs in reports) — preserving the privacy intent.
         resp.headers.setdefault("Referrer-Policy", "same-origin")
         resp.headers.setdefault("Content-Security-Policy", _CSP)
+        # HSTS: tell browsers to stick to https for a year. No
+        # includeSubDomains / preload — each host owns its own policy.
+        resp.headers.setdefault("Strict-Transport-Security", _HSTS)
         return resp
 
     # -- routes -----------------------------------------------------------------
