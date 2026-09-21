@@ -190,13 +190,29 @@ generated report.html inline), `/about` (methodology), `/healthz`
     method, so a plain-http POST is re-sent over https instead of being
     silently downgraded to a bodiless GET. HSTS already supplies the durable
     client-side upgrade, so permanence buys nothing. **Do not "restore" the
-    301.**
+    301.** **`Vary: X-Forwarded-Proto` is on EVERY response, not just the 307**
+    (B2, from the 2026-09-19 break-staging sweep): the 200s/302s the redirect
+    gates are equally scheme-dependent, so a shared cache could otherwise store
+    an https-served 200 and later hand it to a plain-http request. Stamped in
+    the security-headers `after_request` with **`resp.vary.add()`, never
+    `headers["Vary"] = …`** — Flask appends `Cookie` to `Vary` itself when the
+    session is touched, and assignment would silently clobber it; `.vary.add()`
+    is also idempotent, so the 307's own value is not doubled.
   - **The `Location` is built from the configured `APP_HOST`, NEVER from the
     request's own Host/URL** — host reflection would make this an open
     redirect. `APP_HOST` is re-validated as a bare hostname (`_HOSTNAME_RE`,
     anchored with `\A`/`\Z` — `$` also matches before a trailing newline)
     before it can reach a response header; a malformed value disables the
-    redirect rather than emitting it.
+    redirect rather than emitting it. **It must contain at least one DOT and
+    its final label may not be all-digits** (B1, same sweep) — a public origin
+    pin always has a dot, and without that rule `APP_HOST=localhost` (or a bare
+    IPv4 literal, or the compose service name `taste-twin`) *validated*, so
+    every plain-http visitor got a live `Location: https://localhost/…`: broken
+    for everyone, and silent precisely BECAUSE the value passed, so the
+    fail-open branch never fired. Those values now fail open. Strictly a
+    tightening — `taste-twin.graham-williams.com`, the apex and the 253-char
+    boundary host all still pass. `_HOSTNAME_RE` is kept **byte-identical**
+    across km-tracker, jjho-fan-almanac, hopper-dashboard and baby-pool.
   - **`APP_HOST` unset/malformed => no redirect at all (fail OPEN).** HSTS is
     still sent. This is what keeps local dev and the tests working.
   - **Path + query are preserved byte-for-byte, percent-encoding included.**

@@ -66,9 +66,21 @@ _HSTS = "max-age=31536000"
 # Per-LABEL pattern (each dot-separated label 1-63 chars, no leading or
 # trailing hyphen) — byte-identical to the one in jjho-fan-almanac, so all
 # five sibling apps agree on exactly what a hostname is.
+#
+# ⚠️ At least ONE DOT is required (>=2 labels) and the final label may not be
+# all-digits. These are PUBLIC origin pins, and a public hostname always has a
+# dot. Without that rule `APP_HOST=localhost` — or a bare IPv4 literal like
+# 127.0.0.1 — VALIDATED, so every plain-http visitor was handed a live
+# `Location: https://localhost/…`: a redirect broken for everyone, and silent
+# precisely BECAUSE the value passed validation, so the loud fail-open branch
+# below never fired. Such a value now lands in that fail-open + warn branch
+# instead, which is the safe, diagnosable outcome. (IPv6 literals were never
+# accepted: ':' and '[' ']' are outside the character class already.)
+# Measured on staging by the break-staging sweep, 2026-09-19.
 _HOSTNAME_RE = re.compile(
     r"\A(?=.{1,253}\Z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
-    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\Z")
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
+    r"\.(?![0-9]+\Z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
 # A raw request target we are willing to echo back verbatim into a Location
 # header: origin-form (starts with "/") and printable ASCII only. Anything else
@@ -264,7 +276,9 @@ def create_app(data_dir: str | Path | None = None, runner=None,
             return None
         resp = redirect(f"https://{https_host}{_request_target()}", code=307)
         resp.headers["Cache-Control"] = "no-store"
-        resp.headers["Vary"] = "X-Forwarded-Proto"
+        # .vary.add(), never headers["Vary"] = ...: Flask appends "Cookie" to
+        # Vary when the session is touched and an assignment would drop it.
+        resp.vary.add("X-Forwarded-Proto")
         return resp
 
     @app.before_request
@@ -337,6 +351,16 @@ def create_app(data_dir: str | Path | None = None, runner=None,
         # HSTS: tell browsers to stick to https for a year. No
         # includeSubDomains / preload — each host owns its own policy.
         resp.headers.setdefault("Strict-Transport-Security", _HSTS)
+        # Vary on EVERY response, not just the 307. The redirect decision keys
+        # entirely off X-Forwarded-Proto, so the 200/302 bodies it gates are
+        # equally scheme-dependent: without this a shared cache could store an
+        # https-served 200 and later hand it to a plain-http request. Theoretical
+        # behind Cloudflare today, but "the edge is one dashboard toggle from
+        # regressing" is this whole feature's threat model, so the
+        # cache-correctness argument is carried through.
+        # .vary.add() APPENDS — Flask adds "Cookie" to Vary when the session is
+        # touched, and ``headers["Vary"] = ...`` would silently clobber it.
+        resp.vary.add("X-Forwarded-Proto")
         return resp
 
     # -- routes -----------------------------------------------------------------

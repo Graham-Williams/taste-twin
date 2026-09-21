@@ -186,7 +186,41 @@ def test_redirect_is_not_cacheable_and_declares_its_vary(pinned_app):
     resp = _get(pinned_app, "/static/does-not-matter.css", proto="http")
     assert resp.status_code == 307
     assert resp.headers["Cache-Control"] == "no-store"
-    assert resp.headers["Vary"] == "X-Forwarded-Proto"
+    assert "X-Forwarded-Proto" in resp.headers["Vary"]
+
+
+# -- B2: Vary is two-sided ----------------------------------------------------
+#
+# `Vary: X-Forwarded-Proto` used to be on the 307 ONLY. The 200s/302s whose
+# content the redirect gates are equally scheme-dependent, so a shared cache
+# could store an https-served 200 and later hand it to a plain-http request.
+
+
+def _vary_tokens(resp):
+    return {t.strip().lower()
+            for t in resp.headers.get("Vary", "").split(",") if t.strip()}
+
+
+@pytest.mark.parametrize("proto", [None, "https"])
+def test_vary_is_on_non_redirect_responses_too(pinned_app, proto):
+    resp = _get(pinned_app, "/healthz", proto=proto) if proto else \
+        pinned_app.test_client().get("/healthz", base_url=f"https://{APP_HOST}")
+    assert resp.status_code == 200
+    assert "x-forwarded-proto" in _vary_tokens(resp)
+
+
+def test_vary_append_does_not_clobber_an_existing_value(pinned_app):
+    """⚠️ `headers["Vary"] = ...` DROPS a Vary already on the response.
+
+    Flask adds "Cookie" itself whenever the session is touched, so assignment
+    would break session caching. `.vary.add()` appends; both must survive.
+    """
+    from flask import Response
+    resp = Response("x")
+    resp.headers["Vary"] = "Cookie"
+    with pinned_app.test_request_context("/"):
+        resp = pinned_app.process_response(resp)
+    assert _vary_tokens(resp) == {"cookie", "x-forwarded-proto"}
 
 
 def test_redirect_is_307_not_301(pinned_app):
@@ -222,6 +256,15 @@ assert (len(_MAX_LEN_HOST), len(_OVERLONG_HOST)) == (253, 254)
     "taste-twin-.example.com",   # trailing-hyphen label
     "taste-twin..example.com",   # empty label
     _OVERLONG_HOST,             # 254 chars: one over the DNS maximum
+    # --- B1: a public origin pin always has a dot ------------------------
+    # These USED TO VALIDATE, which is why the bug was silent: APP_HOST=localhost
+    # emitted a live `Location: https://localhost/...` to every plain-http
+    # visitor instead of tripping the fail-open warning.
+    "localhost",                # single label
+    "taste-twin",               # a compose service name
+    "127.0.0.1",                # bare IPv4 literal
+    "192.168.1.1",
+    "::1",                      # IPv6 (never matched: ':' not in the class)
 ])
 def test_malformed_app_host_disables_the_redirect(tmp_path, monkeypatch,
                                                   bad_host):
@@ -247,6 +290,20 @@ def test_app_host_length_boundary_is_exactly_the_dns_maximum():
     from tastetwin.web.app import _HOSTNAME_RE
     assert _HOSTNAME_RE.fullmatch(_MAX_LEN_HOST)
     assert not _HOSTNAME_RE.fullmatch(_OVERLONG_HOST)
+
+
+def test_a_public_origin_pin_must_have_a_dot_and_not_be_an_ip():
+    """B1: single-label values and bare IP literals are not public hostnames.
+
+    Strictly a TIGHTENING — every host these apps actually use still passes.
+    """
+    from tastetwin.web.app import _HOSTNAME_RE
+    for good in ("taste-twin.graham-williams.com", "graham-williams.com",
+                 "taste-twin.example.com", "a.b", _MAX_LEN_HOST):
+        assert _HOSTNAME_RE.fullmatch(good), good
+    for bad in ("localhost", "x", "taste-twin", "127.0.0.1", "0.0.0.0",
+                "192.168.1.1", "255.255.255.255"):
+        assert not _HOSTNAME_RE.fullmatch(bad), bad
 
 
 # -- HSTS ---------------------------------------------------------------------
