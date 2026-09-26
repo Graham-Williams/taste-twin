@@ -346,7 +346,9 @@ Never weaken these without explicit approval:
 
 ### CI (`.github/workflows/ci.yml`)
 
-Runs on every PR to `main` and on pushes to `main`. One `test` job:
+Runs on every pull request (the `pull_request` trigger is deliberately
+unfiltered, so a stacked PR based on another branch still gets CI) and on
+pushes to `main`. One `test` job:
 Python 3.12, `pip install -r requirements-dev.txt`, `python -m pytest -q`
 (268 tests: fixtures, hand-computed math, synthetic-CSV ingest, web app with a
 fake JWKS and a mocked pipeline runner). No network, no pool DB.
