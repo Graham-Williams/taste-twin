@@ -117,7 +117,26 @@ generated report.html inline), `/about` (methodology), `/healthz`
   plus at most `MAX_TERMINAL_JOBS` (100) most-recent terminal (done/failed)
   jobs; older terminal jobs are evicted from memory but remain on disk
   (`job.json`) and are re-read on demand by `get`/`list_runs`, so a
-  long-lived process can't grow unbounded.
+  long-lived process can't grow unbounded. **The worker publishes a job's
+  terminal state and runs `_evict_terminal()` in ONE `self._cond` critical
+  section** (issue #10) — split them and a reader that sees the job as
+  terminal can also see the map holding `max_terminal_jobs + 1` terminal
+  jobs. Keep them together.
+- **`job.json` writes are atomic** (`_atomic_write_json`: sibling temp file +
+  `os.replace`), never `Path.write_text` (issue #10). `write_text` truncates
+  before writing, so a concurrent reader could catch the file empty — every
+  in-app reader catches `JSONDecodeError`, so the symptom was only a run
+  briefly vanishing from the homepage list, but it was a real torn read.
+  Any new writer of a state file uses the same helper.
+- **Testing the worker: wait on the DURABLE signal, not the in-memory flag.**
+  `mgr.get(u).status` flips *before* `_persist` runs, so
+  `wait_until(lambda: mgr.get(u).status == "done")` can return while the
+  worker is still mid-teardown — that raced-and-flaked two tests at ~6%/run
+  until issue #10. When a test then inspects anything the worker does at or
+  after the terminal transition (the on-disk file, the eviction cap), wait on
+  `persisted_status(data_dir, user)` in `tests/test_web_jobs.py`: `_persist`
+  is the worker's last act on a job, so "job.json says done" means the whole
+  transition finished.
 - **Sign-in (app-level shared-password gate):** when `APP_PASSWORD` is set the
   app runs its own password gate — a `before_request` (registered ahead of the
   CF-Access and Host pins, and just after the `_force_https` upgrade) redirects
