@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # This app runs on the CPython 3.12 line and `python:3.12-slim` is a
+      # floating tag, so security-patched CPython/Debian rebuilds already arrive
+      # on every image build with no PR needed. All Dependabot could propose is
+      # the next feature release (3.13/3.14) — an interpreter migration to be
+      # decided and tested deliberately, not taken automatically.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
