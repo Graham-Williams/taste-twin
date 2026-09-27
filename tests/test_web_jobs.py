@@ -22,6 +22,25 @@ def wait_until(predicate, timeout=5.0, interval=0.01):
     return False
 
 
+def persisted_status(data_dir, user):
+    """The status recorded in ``job.json`` on disk, or None if not readable.
+
+    The DURABLE signal, and the one to wait on whenever a test then inspects
+    something the worker does at or after the terminal transition.
+    ``mgr.get(u).status`` flips in memory strictly before ``_persist`` runs, so
+    waiting on it returns while the worker is still mid-teardown — that is the
+    race behind both flakes fixed here (issue #10). ``_persist`` is the last
+    thing the worker does for a job, and it is atomic, so "job.json says done"
+    means the whole terminal transition (including ``_evict_terminal``) is
+    complete.
+    """
+    try:
+        return json.loads(
+            (data_dir / "runs" / user / "job.json").read_text())["status"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
 @pytest.fixture
 def data_dir(tmp_path):
     d = tmp_path / "data"
@@ -164,7 +183,11 @@ def test_state_persisted_to_disk(data_dir):
     mgr.start()
     try:
         mgr.enqueue("diskuser")
-        assert wait_until(lambda: mgr.get("diskuser").status == "done")
+        # Wait on the file itself, not on the in-memory flag: the flag is set
+        # before `_persist` runs, so the old `mgr.get(...).status` wait raced
+        # the write and read a truncated file.
+        assert wait_until(
+            lambda: persisted_status(data_dir, "diskuser") == "done")
         state = json.loads(
             (data_dir / "runs" / "diskuser" / "job.json").read_text())
         assert state["status"] == "done"
@@ -269,8 +292,13 @@ def test_terminal_jobs_evicted_beyond_cap(data_dir):
         users = [f"user{i}" for i in range(7)]
         for u in users:
             mgr.enqueue(u)
+        # `_persist` is the worker's last act on a job and runs *after* the
+        # lock section that flips the status and evicts, so an on-disk "done"
+        # for the final job proves eviction has already happened. Waiting on
+        # the in-memory flag instead could sample the map mid-transition.
         assert wait_until(
-            lambda: all(mgr.get(u).status == "done" for u in users))
+            lambda: all(persisted_status(data_dir, u) == "done"
+                        for u in users))
         # In-memory terminal jobs capped at 3.
         with mgr._cond:
             in_memory = [j for j in mgr._jobs.values()

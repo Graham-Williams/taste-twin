@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -56,6 +57,34 @@ MIN_OVERLAP = 15
 
 _PERSISTED_FIELDS = ("username", "status", "stage", "error",
                      "created_at", "started_at", "finished_at")
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write ``payload`` to ``path`` as JSON, atomically.
+
+    ``Path.write_text`` truncates first and writes second, so a concurrent
+    reader can observe the file empty or half-written — which is exactly how
+    ``job.json`` reads used to fail (``JSONDecodeError`` on ``s = ''``). Every
+    in-app reader already catches that, so the visible symptom was benign (a
+    run briefly missing from the homepage list), but it is a genuine torn-read
+    window. Writing a sibling temp file and ``os.replace``-ing it over the
+    target makes the swap atomic on POSIX: a reader sees either the whole old
+    file or the whole new one, never a partial.
+
+    The temp file is a sibling (same directory, therefore same filesystem) so
+    ``os.replace`` is a rename rather than a cross-device copy.
+    """
+    tmp = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 @dataclass
@@ -135,7 +164,11 @@ class JobManager:
                 state["status"] = "failed"
                 state["error"] = INTERRUPTED_ERROR
                 state["finished_at"] = time.time()
-                state_path.write_text(json.dumps(state))
+                try:
+                    _atomic_write_json(state_path, state)
+                except OSError as exc:
+                    log.warning("could not rewrite %s: %s", state_path, exc)
+                    continue
                 log.warning("Recovered interrupted job for %r -> failed",
                             state.get("username"))
 
@@ -249,7 +282,7 @@ class JobManager:
     def _persist(self, job: Job) -> None:
         state = {k: getattr(job, k) for k in _PERSISTED_FIELDS}
         try:
-            (self._run_dir(job) / "job.json").write_text(json.dumps(state))
+            _atomic_write_json(self._run_dir(job) / "job.json", state)
         except OSError as exc:
             log.warning("could not persist job state for %r: %s",
                         job.username, exc)
@@ -304,23 +337,39 @@ class JobManager:
                 job.status = "running"
                 job.started_at = time.time()
             self._persist(job)
+            # ``stage``/``error`` of None mean "leave the field as the runner
+            # left it" — the failure paths deliberately keep the stage the job
+            # reached, exactly as before.
+            status: str = "done"
+            stage: str | None = "report"
+            error: str | None = None
             try:
                 if not self._ensure_pool():
                     raise pipeline.PipelineError(POOL_UNAVAILABLE_ERROR)
                 self._runner(job)
-                job.status = "done"
-                job.stage = "report"
             except pipeline.PipelineError as exc:
-                job.status = "failed"
-                job.error = str(exc)
+                status, stage, error = "failed", None, str(exc)
             except (Exception, SystemExit) as exc:  # noqa: BLE001
-                job.status = "failed"
-                job.error = f"internal error: {exc}"
+                status, stage = "failed", None
+                error = f"internal error: {exc}"
                 log.exception("job for %r crashed", job.username)
-            job.finished_at = time.time()
-            self._persist(job)
+            # Publish the terminal state and enforce the memory cap in ONE
+            # critical section. If the two were separate, any reader that saw
+            # the job as terminal could also observe the map holding
+            # ``max_terminal_jobs + 1`` terminal jobs in between — a real (if
+            # brief) violation of the documented invariant, not just a test
+            # artifact. Doing both under one lock means the invariant holds at
+            # every instant a caller can observe.
+            finished_at = time.time()
             with self._cond:
+                job.status = status
+                if stage is not None:
+                    job.stage = stage
+                if error is not None:
+                    job.error = error
+                job.finished_at = finished_at
                 self._evict_terminal()
+            self._persist(job)
 
     def _evict_terminal(self) -> None:
         """Cap the in-memory job map (call under ``self._cond``).
