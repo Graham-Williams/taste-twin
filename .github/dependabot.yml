@@ -16,3 +16,10 @@ updates:
       # decided and tested deliberately, not taken automatically.
       - dependency-name: python
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+  # The CI workflow pins every action by commit SHA, which is only safe if the
+  # pins are actually maintained — an unmaintained pin silently freezes on an
+  # old, possibly vulnerable release. This is the stream that keeps them fresh.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
