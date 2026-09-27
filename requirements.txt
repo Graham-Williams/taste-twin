@@ -1,5 +1,5 @@
 requests>=2.32.4
-beautifulsoup4>=4.12
+beautifulsoup4>=4.15.0
 kagglehub>=0.3
 flask>=3.0
 gunicorn>=23.0
