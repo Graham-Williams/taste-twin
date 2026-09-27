@@ -3,4 +3,4 @@ beautifulsoup4>=4.12
 kagglehub>=0.3
 flask>=3.0
 gunicorn>=23.0
-PyJWT[crypto]>=2.8
+PyJWT[crypto]>=2.15.0
